@@ -32,8 +32,8 @@ object FullyWatchdogConfig {
 
     // Storm protection — two tiers
     const val STORM_WINDOW_MS = 5 * 60 * 1000L
-    const val STORM_SOFT_MAX = 5       // max soft-start attempts within STORM_WINDOW_MS
-    const val STORM_HARD_MAX = 2       // max kill+restart attempts within STORM_WINDOW_MS
+    const val STORM_SOFT_MAX = 20      // Increased to allow more attempts for aggressive launchers
+    const val STORM_HARD_MAX = 5       // Increased
 
     // Keep old name as alias so nothing breaks if referenced elsewhere
     const val START_STORM_WINDOW_MS = STORM_WINDOW_MS
@@ -78,7 +78,7 @@ object FullyWatchdogConfig {
     val SYSTEM_WHITELIST = setOf(
         "com.android.settings",
         "com.android.systemui",
-        "com.yandex.tv.launcher",
+        // "com.yandex.tv.launcher",
         "com.yandex.tv.setupwizard",
         "com.yandex.ott" // Yandex.TV app sometimes acts as home
     )

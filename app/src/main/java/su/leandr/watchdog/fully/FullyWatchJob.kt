@@ -40,34 +40,44 @@ class FullyWatchJob : JobService() {
             return false
         }
 
+        if (isJobRunning) {
+            FileLogger.log(this, "Job already in progress, skipping start")
+            jobFinished(params, false)
+            return false
+        }
+
+        isJobRunning = true
         Thread {
-            val result = runCatching { checkAndRecoverFully() }
-                .getOrElse {
-                    FileLogger.log(this, "CRITICAL ERROR: ${it.javaClass.simpleName}: ${it.message}")
-                    WatchdogResult(
-                        action = "watchdog error: ${it.javaClass.simpleName}: ${it.message.orEmpty()}",
-                        topActivity = "unknown",
-                        topSource = "error"
-                    )
+            try {
+                val result = runCatching { checkAndRecoverFully() }
+                    .getOrElse {
+                        FileLogger.log(this, "CRITICAL ERROR: ${it.javaClass.simpleName}: ${it.message}")
+                        WatchdogResult(
+                            action = "watchdog error: ${it.javaClass.simpleName}: ${it.message.orEmpty()}",
+                            topActivity = "unknown",
+                            topSource = "error"
+                        )
+                    }
+                val now = System.currentTimeMillis()
+
+                FileLogger.log(this, "Result: ${result.action} | Top: ${result.topActivity} (${result.topSource})")
+
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .edit()
+                    .putLong(PREF_LAST_CHECK_MS, now)
+                    .putString(PREF_LAST_ACTION, result.action)
+                    .putString(PREF_LAST_TOP_ACTIVITY, result.topActivity)
+                    .putString(PREF_LAST_TOP_SOURCE, result.topSource)
+                    .apply()
+
+                if (WatchdogSettings.isEnabled(this)) {
+                    FullyScheduler.schedule(this)
                 }
-            val now = System.currentTimeMillis()
-
-            FileLogger.log(this, "Result: ${result.action} | Top: ${result.topActivity} (${result.topSource})")
-
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .edit()
-                .putLong(PREF_LAST_CHECK_MS, now)
-                .putString(PREF_LAST_ACTION, result.action)
-                .putString(PREF_LAST_TOP_ACTIVITY, result.topActivity)
-                .putString(PREF_LAST_TOP_SOURCE, result.topSource)
-                .apply()
-
-            if (WatchdogSettings.isEnabled(this)) {
-                FullyScheduler.schedule(this)
-            }
-
-            if (params != null) {
-                jobFinished(params, false)
+            } finally {
+                isJobRunning = false
+                if (params != null) {
+                    jobFinished(params, false)
+                }
             }
         }.start()
 
@@ -75,10 +85,13 @@ class FullyWatchJob : JobService() {
     }
 
     override fun onStopJob(params: JobParameters?): Boolean {
-        if (WatchdogSettings.isEnabled(this)) {
-            FullyScheduler.schedule(this)
+        val reason = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            params?.stopReason.toString()
+        } else {
+            "unknown"
         }
-        return true
+        FileLogger.log(this, "onStopJob: reason=$reason")
+        return false
     }
 
     private fun checkAndRecoverFully(): WatchdogResult {
@@ -201,12 +214,11 @@ class FullyWatchJob : JobService() {
         val targetPackage = WatchdogSettings.fullyPackage(this)
         val targetClass = WatchdogSettings.fullyActivityClass(this)
 
-        val explicitIntent = Intent().setComponent(ComponentName(targetPackage, targetClass))
         val launchIntent = packageManager.getLaunchIntentForPackage(targetPackage)
-        val intent = if (explicitIntent.resolveActivity(packageManager) != null) {
-            explicitIntent
-        } else {
+        val intent = if (launchIntent != null && (targetClass.isBlank() || launchIntent.component?.className == targetClass)) {
             launchIntent
+        } else {
+            Intent().setComponent(ComponentName(targetPackage, targetClass))
         }
 
         if (intent == null) {
@@ -215,12 +227,26 @@ class FullyWatchJob : JobService() {
         }
 
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK) // Always clear task for robustness on YaOS
         if (!cleanStart) {
             intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
+        
+        if (intent.action == null) intent.action = Intent.ACTION_MAIN
+        if (intent.categories == null || intent.categories.isEmpty()) intent.addCategory(Intent.CATEGORY_LAUNCHER)
 
         return try {
+            FileLogger.log(this, "Executing startActivity for ${intent.component?.flattenToShortString()}")
             startActivity(intent)
+            
+            // Fallback for YaOS: try am start via su to bypass background restrictions
+            try {
+                val comp = intent.component?.flattenToShortString() ?: "$targetPackage/$targetClass"
+                Runtime.getRuntime().exec(arrayOf("su", "-c", "am start -n $comp")).waitFor()
+            } catch (e: Exception) {
+                // ignore root failure
+            }
+
             val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             prefs.edit().putLong(PREF_LAST_RELAUNCH_MS, now).apply()
             WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
@@ -312,6 +338,8 @@ class FullyWatchJob : JobService() {
         val topSource: String
     )
 
-    private companion object {
+    companion object {
+        @Volatile
+        private var isJobRunning = false
     }
 }
