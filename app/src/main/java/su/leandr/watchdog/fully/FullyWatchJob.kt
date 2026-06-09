@@ -40,44 +40,26 @@ class FullyWatchJob : JobService() {
             return false
         }
 
-        if (isJobRunning) {
-            FileLogger.log(this, "Job already in progress, skipping start")
-            jobFinished(params, false)
-            return false
-        }
-
-        isJobRunning = true
         Thread {
             try {
                 val result = runCatching { checkAndRecoverFully() }
                     .getOrElse {
-                        FileLogger.log(this, "CRITICAL ERROR: ${it.javaClass.simpleName}: ${it.message}")
+                        val errorMsg = "watchdog error: ${it.javaClass.simpleName}: ${it.message.orEmpty()}"
+                        FileLogger.log(this, "CRITICAL ERROR: $errorMsg")
                         WatchdogResult(
-                            action = "watchdog error: ${it.javaClass.simpleName}: ${it.message.orEmpty()}",
+                            action = errorMsg,
                             topActivity = "unknown",
                             topSource = "error"
                         )
                     }
-                val now = System.currentTimeMillis()
 
-                FileLogger.log(this, "Result: ${result.action} | Top: ${result.topActivity} (${result.topSource})")
-
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                    .edit()
-                    .putLong(PREF_LAST_CHECK_MS, now)
-                    .putString(PREF_LAST_ACTION, result.action)
-                    .putString(PREF_LAST_TOP_ACTIVITY, result.topActivity)
-                    .putString(PREF_LAST_TOP_SOURCE, result.topSource)
-                    .apply()
+                FileLogger.log(this, "Final Result: ${result.action} | Top: ${result.topActivity}")
 
                 if (WatchdogSettings.isEnabled(this)) {
                     FullyScheduler.schedule(this)
                 }
             } finally {
-                isJobRunning = false
-                if (params != null) {
-                    jobFinished(params, false)
-                }
+                jobFinished(params, false)
             }
         }.start()
 
@@ -98,6 +80,17 @@ class FullyWatchJob : JobService() {
         WatchdogSettings.increment(this, PREF_STAT_CHECKS)
         val topActivity = detectTopActivity()
         val targetPackage = WatchdogSettings.fullyPackage(this)
+        
+        val now = System.currentTimeMillis()
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        
+        // Write status early so we can see it even if we crash/kill later
+        prefs.edit()
+            .putLong(PREF_LAST_CHECK_MS, now)
+            .putString(PREF_LAST_TOP_ACTIVITY, topActivity.displayName)
+            .putString(PREF_LAST_TOP_SOURCE, topActivity.source)
+            .apply()
+
         val isFullyOnTop = topActivity.packageName == targetPackage
         val isSelfOnTop = topActivity.packageName == packageName
         val isSystemOnTop = FullyWatchdogConfig.SYSTEM_WHITELIST.contains(topActivity.packageName)
@@ -105,8 +98,6 @@ class FullyWatchJob : JobService() {
         Log.d("FullyWatchdog", "Check: top=${topActivity.packageName}/${topActivity.className} source=${topActivity.source}")
         FileLogger.log(this, "Check: top=${topActivity.packageName} source=${topActivity.source}")
 
-        val now = System.currentTimeMillis()
-        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         val lastSoftRelaunchMs = prefs.getLong(PREF_LAST_SOFT_RELAUNCH_MS, 0L)
         val softRelaunchMs = WatchdogSettings.softRelaunchMs(this)
 
@@ -137,7 +128,13 @@ class FullyWatchJob : JobService() {
                     val logMsg = "Starting Fully (cleanStart=${!isProcessAlive})"
                     Log.i("FullyWatchdog", logMsg)
                     FileLogger.log(this, logMsg)
-                    tryStartFully(cleanStart = !isProcessAlive)
+                    val startResult = tryStartFully(cleanStart = !isProcessAlive)
+                    
+                    // Reset soft relaunch timer on clean start to avoid immediate relaunch
+                    if (!isProcessAlive && !startResult.contains("suppressed") && !startResult.contains("failed")) {
+                        prefs.edit().putLong(PREF_LAST_SOFT_RELAUNCH_MS, now).apply()
+                    }
+                    startResult
                 }
             }
 
@@ -157,6 +154,9 @@ class FullyWatchJob : JobService() {
                 "ok: Fully is foreground"
             }
         }
+        
+        // Final action write
+        prefs.edit().putString(PREF_LAST_ACTION, action).apply()
 
         return WatchdogResult(
             action = action,
@@ -338,8 +338,6 @@ class FullyWatchJob : JobService() {
         val topSource: String
     )
 
-    companion object {
-        @Volatile
-        private var isJobRunning = false
+    private companion object {
     }
 }
