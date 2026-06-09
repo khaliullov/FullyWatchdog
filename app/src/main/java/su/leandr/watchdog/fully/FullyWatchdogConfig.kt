@@ -41,7 +41,7 @@ object FullyWatchdogConfig {
 
     // UsageEvents lookback windows
     const val USAGE_EVENTS_SHORT_LOOKBACK_MS = 60_000L          // primary: last 60 s
-    const val USAGE_EVENTS_LONG_LOOKBACK_MS = 5 * 60 * 1000L    // fallback: last 5 min
+    const val USAGE_EVENTS_LONG_LOOKBACK_MS = 24 * 60 * 60 * 1000L // fallback: last 24h
 
     const val PREFS_NAME = "fully_watchdog"
     const val PREF_ENABLED = "enabled"
@@ -78,7 +78,8 @@ object FullyWatchdogConfig {
     val SYSTEM_WHITELIST = setOf(
         "com.android.settings",
         "com.android.systemui",
-        // "com.yandex.tv.launcher",
+        // "com.spocky.projengmenu", // Projector launcher
+        // "com.yandex.tv.launcher", // Yandex launcher
         "com.yandex.tv.setupwizard",
         "com.yandex.ott" // Yandex.TV app sometimes acts as home
     )
