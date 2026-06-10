@@ -579,6 +579,9 @@ fun WatchdogScreen() {
             }
             Row(modifier = Modifier.fillMaxWidth()) {
                 StatCard("Errors", stats.errors.toString(), modifier = Modifier.weight(1f))
+                StatCard("Mem Recoveries", stats.memRestarts.toString(), modifier = Modifier.weight(1f))
+            }
+            Row(modifier = Modifier.fillMaxWidth()) {
                 StatCard("TV Reboot Attempts", stats.rebootAttempts.toString(), modifier = Modifier.weight(1f))
             }
         }
@@ -734,20 +737,12 @@ fun rebootDevice(context: android.content.Context) {
     val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
     try {
         pm?.reboot(null)
-        return // succeeded — nothing more to do
-    } catch (_: Exception) { }
-
-    // Attempt 2: root shell
-    try {
-        val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "reboot"))
-        process.waitFor()
-        if (process.exitValue() == 0) return
-    } catch (_: Exception) { }
-
-    // Attempt 3: plain shell (some TV firmwares allow it without root)
-    try {
-        Runtime.getRuntime().exec("reboot")
         return
+    } catch (_: Exception) { }
+
+    // Attempt 2: plain shell (some TV firmwares allow it via "reboot" binary if permissions allow)
+    try {
+        Runtime.getRuntime().exec("reboot").waitFor()
     } catch (_: Exception) { }
 
     // All attempts failed — guide the user

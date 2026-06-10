@@ -62,7 +62,10 @@ object WatchdogSettings {
         prefs(context).getLong(PREF_OVERRIDE_DEADLINE_MS, DEFAULT_WATCHDOG_OVERRIDE_DEADLINE_MS)
 
     fun softRelaunchMs(context: Context): Long =
-        prefs(context).getLong(PREF_SOFT_RELAUNCH_MS, DEFAULT_SOFT_RELAUNCH_INTERVAL_MS)
+        prefs(context).getLong(FullyWatchdogConfig.PREF_SOFT_RELAUNCH_MS, FullyWatchdogConfig.DEFAULT_SOFT_RELAUNCH_INTERVAL_MS)
+
+    fun maxMemoryMb(context: Context): Int =
+        prefs(context).getInt(FullyWatchdogConfig.PREF_MAX_MEMORY_MB, FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB)
 
     fun lastStartAttempts(context: Context): List<Long> =
         prefs(context).getString(PREF_LAST_START_ATTEMPTS, "").orEmpty()
@@ -106,25 +109,28 @@ object WatchdogSettings {
         fullyActivityClass: String? = null,
         intervalMs: Long? = null,
         overrideDeadlineMs: Long? = null,
-        softRelaunchMs: Long? = null
+        softRelaunchMs: Long? = null,
+        maxMemoryMb: Int? = null
     ) {
         val editor = prefs(context).edit()
-        fullyPackage?.let { editor.putString(PREF_FULLY_PACKAGE, it.trim()) }
-        fullyActivityClass?.let { editor.putString(PREF_FULLY_ACTIVITY_CLASS, it.trim()) }
-        intervalMs?.let { editor.putLong(PREF_INTERVAL_MS, it.coerceAtLeast(MIN_DELAY_MS)) }
-        overrideDeadlineMs?.let { editor.putLong(PREF_OVERRIDE_DEADLINE_MS, it.coerceAtLeast(MIN_DELAY_MS)) }
-        softRelaunchMs?.let { editor.putLong(PREF_SOFT_RELAUNCH_MS, it.coerceAtLeast(0L)) }
+        fullyPackage?.let { editor.putString(FullyWatchdogConfig.PREF_FULLY_PACKAGE, it.trim()) }
+        fullyActivityClass?.let { editor.putString(FullyWatchdogConfig.PREF_FULLY_ACTIVITY_CLASS, it.trim()) }
+        intervalMs?.let { editor.putLong(FullyWatchdogConfig.PREF_INTERVAL_MS, it.coerceAtLeast(MIN_DELAY_MS)) }
+        overrideDeadlineMs?.let { editor.putLong(FullyWatchdogConfig.PREF_OVERRIDE_DEADLINE_MS, it.coerceAtLeast(MIN_DELAY_MS)) }
+        softRelaunchMs?.let { editor.putLong(FullyWatchdogConfig.PREF_SOFT_RELAUNCH_MS, it.coerceAtLeast(0L)) }
+        maxMemoryMb?.let { editor.putInt(FullyWatchdogConfig.PREF_MAX_MEMORY_MB, it.coerceAtLeast(0)) }
         editor.apply()
     }
 
     fun resetDefaults(context: Context) {
         prefs(context).edit()
-            .putString(PREF_FULLY_PACKAGE, DEFAULT_FULLY_PACKAGE)
-            .putString(PREF_FULLY_ACTIVITY_CLASS, DEFAULT_FULLY_ACTIVITY_CLASS)
-            .putLong(PREF_INTERVAL_MS, DEFAULT_WATCHDOG_INTERVAL_MS)
-            .putLong(PREF_OVERRIDE_DEADLINE_MS, DEFAULT_WATCHDOG_OVERRIDE_DEADLINE_MS)
-            .putLong(PREF_SOFT_RELAUNCH_MS, DEFAULT_SOFT_RELAUNCH_INTERVAL_MS)
-            .putBoolean(PREF_AUTO_CLOSE, DEFAULT_AUTO_CLOSE)
+            .putString(FullyWatchdogConfig.PREF_FULLY_PACKAGE, FullyWatchdogConfig.DEFAULT_FULLY_PACKAGE)
+            .putString(FullyWatchdogConfig.PREF_FULLY_ACTIVITY_CLASS, FullyWatchdogConfig.DEFAULT_FULLY_ACTIVITY_CLASS)
+            .putLong(FullyWatchdogConfig.PREF_INTERVAL_MS, FullyWatchdogConfig.DEFAULT_WATCHDOG_INTERVAL_MS)
+            .putLong(FullyWatchdogConfig.PREF_OVERRIDE_DEADLINE_MS, FullyWatchdogConfig.DEFAULT_WATCHDOG_OVERRIDE_DEADLINE_MS)
+            .putLong(FullyWatchdogConfig.PREF_SOFT_RELAUNCH_MS, FullyWatchdogConfig.DEFAULT_SOFT_RELAUNCH_INTERVAL_MS)
+            .putInt(FullyWatchdogConfig.PREF_MAX_MEMORY_MB, FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB)
+            .putBoolean(FullyWatchdogConfig.PREF_AUTO_CLOSE, FullyWatchdogConfig.DEFAULT_AUTO_CLOSE)
             .apply()
     }
 
@@ -147,24 +153,26 @@ object WatchdogSettings {
             errors = sharedPreferences.getLong(PREF_STAT_ERRORS, 0L),
             rebootAttempts = sharedPreferences.getLong(PREF_STAT_REBOOT_ATTEMPTS, 0L),
             crashRestarts = sharedPreferences.getLong(PREF_STAT_CRASH_RESTARTS, 0L),
-            totalRelaunches = sharedPreferences.getLong(PREF_STAT_TOTAL_RELAUNCHES, 0L),
-            lastRelaunchMs = sharedPreferences.getLong(PREF_LAST_RELAUNCH_MS, 0L)
+            totalRelaunches = sharedPreferences.getLong(FullyWatchdogConfig.PREF_STAT_TOTAL_RELAUNCHES, 0L),
+            memRestarts = sharedPreferences.getLong(FullyWatchdogConfig.PREF_STAT_MEM_RESTARTS, 0L),
+            lastRelaunchMs = sharedPreferences.getLong(FullyWatchdogConfig.PREF_LAST_RELAUNCH_MS, 0L)
         )
     }
 
     fun resetStats(context: Context) {
         prefs(context).edit()
-            .putLong(PREF_STAT_CHECKS, 0L)
-            .putLong(PREF_STAT_OK, 0L)
-            .putLong(PREF_STAT_FOREGROUND_STARTS, 0L)
-            .putLong(PREF_STAT_SOFT_RELAUNCHES, 0L)
-            .putLong(PREF_STAT_TOTAL_RELAUNCHES, 0L)
-            .putLong(PREF_LAST_RELAUNCH_MS, 0L)
-            .putLong(PREF_STAT_SUPPRESSED, 0L)
-            .putLong(PREF_STAT_UI_SKIPS, 0L)
-            .putLong(PREF_STAT_ERRORS, 0L)
-            .putLong(PREF_STAT_REBOOT_ATTEMPTS, 0L)
-            .putLong(PREF_STAT_CRASH_RESTARTS, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_CHECKS, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_OK, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_FOREGROUND_STARTS, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_SOFT_RELAUNCHES, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_TOTAL_RELAUNCHES, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_MEM_RESTARTS, 0L)
+            .putLong(FullyWatchdogConfig.PREF_LAST_RELAUNCH_MS, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_SUPPRESSED, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_UI_SKIPS, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_ERRORS, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_REBOOT_ATTEMPTS, 0L)
+            .putLong(FullyWatchdogConfig.PREF_STAT_CRASH_RESTARTS, 0L)
             .apply()
     }
 
@@ -242,5 +250,6 @@ data class WatchdogStats(
     val rebootAttempts: Long,
     val crashRestarts: Long,
     val totalRelaunches: Long,
+    val memRestarts: Long,
     val lastRelaunchMs: Long
 )

@@ -5,10 +5,7 @@ import android.app.job.JobParameters
 import android.app.job.JobService
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
-import android.content.ComponentName
 import android.content.Intent
-import android.os.Build
-import android.util.Log
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREFS_NAME
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_LAST_SOFT_RELAUNCH_MS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_LAST_RELAUNCH_MS
@@ -16,47 +13,36 @@ import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_LAST_START_ATTEMPTED_MS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_LAST_CHECK_MS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_LAST_ACTION
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_LAST_TOP_ACTIVITY
-import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_LAST_TOP_SOURCE
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_CHECKS
-import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_UI_SKIPS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_SOFT_RELAUNCHES
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_TOTAL_RELAUNCHES
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_OK
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_SUPPRESSED
-import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_ERRORS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_FOREGROUND_STARTS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.PREF_STAT_CRASH_RESTARTS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.STORM_WINDOW_MS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.STORM_SOFT_MAX
 import su.leandr.watchdog.fully.FullyWatchdogConfig.STORM_HARD_MAX
 import su.leandr.watchdog.fully.FullyWatchdogConfig.USAGE_EVENTS_SHORT_LOOKBACK_MS
-import su.leandr.watchdog.fully.FullyWatchdogConfig.USAGE_EVENTS_LONG_LOOKBACK_MS
 
 class FullyWatchJob : JobService() {
     override fun onStartJob(params: JobParameters?): Boolean {
-        if (!WatchdogSettings.isEnabled(this)) {
-            FullyScheduler.cancelAll(this)
+        val jobId = params?.jobId ?: -1
+        
+        // 1. NON-BLOCKING Chain survival: must be instant!
+        if (WatchdogSettings.isEnabled(this)) {
+            FullyScheduler.schedule(this, currentJobId = jobId)
+        } else {
             jobFinished(params, false)
             return false
         }
 
-        // Schedule NEXT job immediately to ensure continuity even if this process is killed
-        FullyScheduler.schedule(this)
-
+        // 2. Everything else happens in a background thread
         Thread {
             try {
-                val result = runCatching { checkAndRecoverFully() }
-                    .getOrElse {
-                        val errorMsg = "watchdog error: ${it.javaClass.simpleName}: ${it.message.orEmpty()}"
-                        FileLogger.log(this, "CRITICAL ERROR: $errorMsg")
-                        WatchdogResult(
-                            action = errorMsg,
-                            topActivity = "unknown",
-                            topSource = "error"
-                        )
-                    }
-
-                FileLogger.log(this, "Final Result: ${result.action} | Top: ${result.topActivity}")
+                performRescueCycle()
+            } catch (e: Exception) {
+                FileLogger.log(this, "Thread Error: ${e.message}")
             } finally {
                 jobFinished(params, false)
             }
@@ -65,278 +51,212 @@ class FullyWatchJob : JobService() {
         return true
     }
 
-    override fun onStopJob(params: JobParameters?): Boolean {
-        val reason = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            params?.stopReason.toString()
-        } else {
-            "unknown"
+    override fun onStopJob(params: JobParameters?): Boolean = false
+
+    private fun performRescueCycle() {
+        val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        val memInfo = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(memInfo)
+
+        val availMb = memInfo.availMem / 1024 / 1024
+        val target = WatchdogSettings.fullyPackage(this)
+        val now = System.currentTimeMillis()
+        val prefs = getSharedPreferences(FullyWatchdogConfig.PREFS_NAME, MODE_PRIVATE)
+        
+        // Deadman Switch: If the system was so stuck that we missed multiple cycles, reboot.
+        val lastCheck = prefs.getLong(FullyWatchdogConfig.PREF_LAST_CHECK_MS, 0L)
+        val interval = WatchdogSettings.intervalMs(this)
+        val deadmanThreshold = maxOf(60000L, interval * 3)
+        
+        if (lastCheck > 0 && (now - lastCheck) > deadmanThreshold) {
+            FileLogger.log(this, "DEADMAN: Last check was ${(now - lastCheck)/1000}s ago (threshold ${deadmanThreshold/1000}s). System is frozen. Rebooting.")
+            // Update timestamp even before reboot to avoid instant reboot loop if reboot fails
+            prefs.edit().putLong(FullyWatchdogConfig.PREF_LAST_CHECK_MS, now).apply()
+            rebootDevice(this)
+            return
         }
-        FileLogger.log(this, "onStopJob: reason=$reason")
-        return false
+        
+        // Mark as alive
+        prefs.edit().putLong(FullyWatchdogConfig.PREF_LAST_CHECK_MS, now).apply()
+
+        // Panic Check: System is gasping for air (threshold 200MB for TV)
+        if (memInfo.lowMemory || availMb < 200) {
+            FileLogger.log(this, "PANIC: System memory critical (${availMb}MB free). Forced kill of $target.")
+            fastKillTarget(target)
+            WatchdogSettings.increment(this, FullyWatchdogConfig.PREF_STAT_TOTAL_RELAUNCHES)
+            return
+        }
+
+        // Memory Check via fast RSS approximation
+        val maxMb = WatchdogSettings.maxMemoryMb(this)
+        if (maxMb > 0) {
+            val proc = am.runningAppProcesses?.find { it.processName == target }
+            if (proc != null) {
+                val rssMb = getRssMb(proc.pid)
+                if (rssMb > maxMb) {
+                    FileLogger.log(this, "Memory Limit: ${rssMb}MB RSS > ${maxMb}MB. Restarting.")
+                    fastKillTarget(target)
+                    WatchdogSettings.increment(this, FullyWatchdogConfig.PREF_STAT_MEM_RESTARTS)
+                    WatchdogSettings.increment(this, FullyWatchdogConfig.PREF_STAT_TOTAL_RELAUNCHES)
+                    return
+                }
+            }
+        }
+
+        // Normal activity check
+        runCatching { checkAndRecoverFully() }
+    }
+
+    private fun fastKillTarget(packageName: String) {
+        val now = System.currentTimeMillis()
+        val attempts = WatchdogSettings.lastKillAttempts(this).filter { now - it < STORM_WINDOW_MS }
+        if (attempts.size >= STORM_HARD_MAX) return
+
+        WatchdogSettings.setLastKillAttempts(this, attempts + now)
+        
+        // Try various methods to stop the process, from most aggressive to least
+        runCatching {
+            // 1. Try pkill directly (might work if shell has enough perms or it's our own child)
+            Runtime.getRuntime().exec(arrayOf("pkill", "-9", "-f", packageName)).waitFor()
+        }
+        runCatching {
+            // 2. Try ActivityManager to at least request background death
+            val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+            am.killBackgroundProcesses(packageName)
+        }
+        runCatching {
+            // 3. Try "am force-stop" without su (some firmwares allow this via shell if debuggable or via certain perms)
+            Runtime.getRuntime().exec(arrayOf("am", "force-stop", packageName)).waitFor()
+        }
+        
+        Thread.sleep(300)
+        tryStartFully(cleanStart = true)
+    }
+
+    private fun getRssMb(pid: Int): Int {
+        return try {
+            // Without Root, reading /proc/[pid]/statm of another process is blocked on Android 7+.
+            // We fall back to getProcessMemoryInfo, which is safe to call here since we are in a background thread.
+            val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+            val memInfo = am.getProcessMemoryInfo(intArrayOf(pid))
+            if (memInfo.isNotEmpty()) {
+                memInfo[0].totalPss / 1024 // Return in MB
+            } else -1
+        } catch (e: Exception) { -1 }
     }
 
     private fun checkAndRecoverFully(): WatchdogResult {
         WatchdogSettings.increment(this, PREF_STAT_CHECKS)
         val topActivity = detectTopActivity()
         val targetPackage = WatchdogSettings.fullyPackage(this)
-        
         val now = System.currentTimeMillis()
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        
-        // Write status early so we can see it even if we crash/kill later
-        prefs.edit()
-            .putLong(PREF_LAST_CHECK_MS, now)
-            .putString(PREF_LAST_TOP_ACTIVITY, topActivity.displayName)
-            .putString(PREF_LAST_TOP_SOURCE, topActivity.source)
-            .apply()
 
         val isFullyOnTop = topActivity.packageName == targetPackage
-        val isSelfOnTop = topActivity.packageName == packageName
         val isSystemOnTop = FullyWatchdogConfig.SYSTEM_WHITELIST.contains(topActivity.packageName)
-        
-        Log.d("FullyWatchdog", "Check: top=${topActivity.packageName}/${topActivity.className} source=${topActivity.source}")
-        FileLogger.log(this, "Check: top=${topActivity.packageName} source=${topActivity.source}")
-
         val lastSoftRelaunchMs = prefs.getLong(PREF_LAST_SOFT_RELAUNCH_MS, 0L)
         val softRelaunchMs = WatchdogSettings.softRelaunchMs(this)
 
         val action = when {
-            isSelfOnTop -> {
-                WatchdogSettings.increment(this, PREF_STAT_UI_SKIPS)
-                "skip: watchdog UI is foreground"
-            }
-
-            isSystemOnTop -> {
-                WatchdogSettings.increment(this, PREF_STAT_UI_SKIPS)
-                "skip: system app on top (${topActivity.packageName})"
-            }
-
+            topActivity.packageName == packageName -> "skip: self"
+            isSystemOnTop -> "skip: system"
             !isFullyOnTop -> {
-                val isProcessAlive = isFullyProcessAlive()
-                Log.w("FullyWatchdog", "Fully NOT on top. isProcessAlive=$isProcessAlive")
-                
-                val lastStartAttemptedMs = WatchdogSettings.lastStartAttemptedMs(this)
-                val wasJustAttempted = lastStartAttemptedMs > 0 && (now - lastStartAttemptedMs < WatchdogSettings.intervalMs(this) * 2)
-
-                if (isProcessAlive && wasJustAttempted) {
-                    val logMsg = "Process alive but window missing after attempt. Triggering hard kill."
-                    Log.e("FullyWatchdog", logMsg)
-                    FileLogger.log(this, logMsg)
-                    killAndRestartFully()
+                if (isFullyProcessAlive() && (now - WatchdogSettings.lastStartAttemptedMs(this) < 60000)) {
+                    fastKillTarget(targetPackage)
+                    "hard recovery"
                 } else {
-                    val logMsg = "Starting Fully (cleanStart=${!isProcessAlive})"
-                    Log.i("FullyWatchdog", logMsg)
-                    FileLogger.log(this, logMsg)
-                    val startResult = tryStartFully(cleanStart = !isProcessAlive)
-                    
-                    // Reset soft relaunch timer on clean start to avoid immediate relaunch
-                    if (!isProcessAlive && !startResult.contains("suppressed") && !startResult.contains("failed")) {
-                        prefs.edit().putLong(PREF_LAST_SOFT_RELAUNCH_MS, now).apply()
-                    }
-                    startResult
+                    tryStartFully(cleanStart = !isFullyProcessAlive())
                 }
             }
-
             softRelaunchMs > 0L && now - lastSoftRelaunchMs >= softRelaunchMs -> {
-                val startResult = tryStartFully(cleanStart = false)
-                if (!startResult.startsWith("restart suppressed") && !startResult.startsWith("start failed")) {
-                    prefs.edit().putLong(PREF_LAST_SOFT_RELAUNCH_MS, now).apply()
-                    WatchdogSettings.increment(this, PREF_STAT_SOFT_RELAUNCHES)
-                    "soft relaunch: $startResult"
-                } else {
-                    startResult
-                }
+                tryStartFully(cleanStart = false)
+                prefs.edit().putLong(PREF_LAST_SOFT_RELAUNCH_MS, now).apply()
+                WatchdogSettings.increment(this, PREF_STAT_SOFT_RELAUNCHES)
+                "soft relaunch"
             }
-
             else -> {
                 WatchdogSettings.increment(this, PREF_STAT_OK)
-                "ok: Fully is foreground"
+                null // Use null to indicate "OK" and skip file logging
             }
         }
         
-        // Final action write
-        prefs.edit().putString(PREF_LAST_ACTION, action).apply()
+        val finalAction = action ?: "ok"
+        
+        if (action != null) {
+            FileLogger.log(this, "Result: $finalAction | Top: ${topActivity.displayName} (${topActivity.source})")
+            if (finalAction != "skip: self" && finalAction != "skip: system") {
+                WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
+            }
+        }
 
-        return WatchdogResult(
-            action = action,
-            topActivity = topActivity.displayName,
-            topSource = topActivity.source
-        )
+        return WatchdogResult(finalAction, topActivity.displayName, topActivity.source)
     }
 
     private fun isFullyProcessAlive(): Boolean {
         val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
-        return am.runningAppProcesses
-            ?.any { it.processName == WatchdogSettings.fullyPackage(this) } == true
-    }
-
-    private fun killAndRestartFully(): String {
-        val now = System.currentTimeMillis()
-        val attempts = WatchdogSettings.lastKillAttempts(this)
-            .filter { now - it < STORM_WINDOW_MS }
-
-        if (attempts.size >= STORM_HARD_MAX) {
-            WatchdogSettings.increment(this, PREF_STAT_SUPPRESSED)
-            return "kill suppressed (hard storm protection)"
-        }
-
-        val newAttempts = attempts + now
-        WatchdogSettings.setLastKillAttempts(this, newAttempts)
-
-        try {
-            // Use su force-stop for other processes
-            Runtime.getRuntime().exec(
-                arrayOf("su", "-c", "am force-stop ${WatchdogSettings.fullyPackage(this)}")
-            ).waitFor()
-        } catch (_: Exception) {
-        }
-        
-        Thread.sleep(1500L)
-        val result = tryStartFully(cleanStart = true)
-        return "kill+restart: $result"
+        val target = WatchdogSettings.fullyPackage(this)
+        return am.runningAppProcesses?.any { it.processName == target } == true
     }
 
     private fun tryStartFully(cleanStart: Boolean): String {
         val now = System.currentTimeMillis()
-        val attempts = WatchdogSettings.lastStartAttempts(this)
-            .filter { now - it < STORM_WINDOW_MS }
-
+        val attempts = WatchdogSettings.lastStartAttempts(this).filter { now - it < STORM_WINDOW_MS }
         if (attempts.size >= STORM_SOFT_MAX) {
             WatchdogSettings.increment(this, PREF_STAT_SUPPRESSED)
-            return "restart suppressed (soft storm protection)"
+            return "start suppressed"
         }
 
-        val newAttempts = attempts + now
-        WatchdogSettings.setLastStartAttempts(this, newAttempts)
+        WatchdogSettings.setLastStartAttempts(this, attempts + now)
         WatchdogSettings.setLastStartAttemptedMs(this, now)
 
         val targetPackage = WatchdogSettings.fullyPackage(this)
-        val targetClass = WatchdogSettings.fullyActivityClass(this)
-
-        val launchIntent = packageManager.getLaunchIntentForPackage(targetPackage)
-        val intent = if (launchIntent != null && (targetClass.isBlank() || launchIntent.component?.className == targetClass)) {
-            launchIntent
-        } else {
-            Intent().setComponent(ComponentName(targetPackage, targetClass))
-        }
-
-        if (intent == null) {
-            WatchdogSettings.increment(this, PREF_STAT_ERRORS)
-            return "start failed: no activity found for $targetPackage"
-        }
-
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK) // Always clear task for robustness on YaOS
-        if (!cleanStart) {
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }
+        val intent = packageManager.getLaunchIntentForPackage(targetPackage) ?: return "no intent"
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         
-        if (intent.action == null) intent.action = Intent.ACTION_MAIN
-        if (intent.categories == null || intent.categories.isEmpty()) intent.addCategory(Intent.CATEGORY_LAUNCHER)
-
         return try {
-            FileLogger.log(this, "Executing startActivity for ${intent.component?.flattenToShortString()}")
             startActivity(intent)
-            
-            // Fallback for YaOS: try am start via su to bypass background restrictions
-            try {
-                val comp = intent.component?.flattenToShortString() ?: "$targetPackage/$targetClass"
-                Runtime.getRuntime().exec(arrayOf("su", "-c", "am start -n $comp")).waitFor()
-            } catch (e: Exception) {
-                // ignore root failure
+            runCatching {
+                // Secondary attempt via am start (standard shell might have enough perms for some intents)
+                val comp = intent.component?.flattenToShortString() ?: targetPackage
+                Runtime.getRuntime().exec(arrayOf("am", "start", "-n", comp)).waitFor()
             }
 
-            val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            prefs.edit().putLong(PREF_LAST_RELAUNCH_MS, now).apply()
-            WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
-
-            if (cleanStart) {
-                WatchdogSettings.increment(this, PREF_STAT_CRASH_RESTARTS)
-            } else {
-                WatchdogSettings.increment(this, PREF_STAT_FOREGROUND_STARTS)
-            }
-            "start target app (${if (cleanStart) "clean" else "soft"}): top=${intent.component?.flattenToShortString() ?: targetPackage}"
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putLong(PREF_LAST_RELAUNCH_MS, now).apply()
+            if (cleanStart) WatchdogSettings.increment(this, PREF_STAT_CRASH_RESTARTS)
+            "started"
         } catch (e: Exception) {
-            WatchdogSettings.increment(this, PREF_STAT_ERRORS)
-            "start failed: ${e.message}"
+            "failed"
         }
     }
 
     private fun detectTopActivity(): TopActivity {
         if (WatchdogSettings.isUsageStatsAvailable(this)) {
-            detectTopActivityWithUsageEvents(USAGE_EVENTS_SHORT_LOOKBACK_MS)?.let { return it }
-            detectTopActivityWithUsageEvents(USAGE_EVENTS_LONG_LOOKBACK_MS)?.let { return it }
-        }
-        detectTopActivityWithRunningTasks()?.let { return it }
-        return TopActivity(
-            packageName = null,
-            className = null,
-            source = "unavailable"
-        )
-    }
-
-    @Suppress("DEPRECATION")
-    private fun detectTopActivityWithRunningTasks(): TopActivity? {
-        val activityManager = getSystemService(ACTIVITY_SERVICE) as ActivityManager
-        val componentName = runCatching {
-            activityManager.getRunningTasks(1).firstOrNull()?.topActivity
-        }.getOrNull() ?: return null
-
-        return TopActivity(
-            packageName = componentName.packageName,
-            className = componentName.className,
-            source = "ActivityManager.getRunningTasks"
-        )
-    }
-
-    private fun detectTopActivityWithUsageEvents(lookbackMs: Long): TopActivity? {
-        val usageStatsManager = getSystemService(USAGE_STATS_SERVICE) as UsageStatsManager
-        val now = System.currentTimeMillis()
-        val events = runCatching {
-            usageStatsManager.queryEvents(now - lookbackMs, now)
-        }.getOrNull() ?: return null
-
-        val event = UsageEvents.Event()
-        var latest: TopActivity? = null
-
-        while (events.hasNextEvent()) {
-            events.getNextEvent(event)
-
-            val isForegroundEvent = event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-                    event.eventType == UsageEvents.Event.ACTIVITY_RESUMED)
-
-            if (isForegroundEvent) {
-                latest = TopActivity(
-                    packageName = event.packageName,
-                    className = event.className,
-                    source = "UsageStatsManager.queryEvents (${lookbackMs / 1000}s)"
-                )
+            val usm = getSystemService(USAGE_STATS_SERVICE) as UsageStatsManager
+            val now = System.currentTimeMillis()
+            // Optimization: check events since last check only
+            val lastCheck = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getLong(PREF_LAST_CHECK_MS, 0L)
+            val lookback = if (lastCheck > 0) maxOf(USAGE_EVENTS_SHORT_LOOKBACK_MS, now - lastCheck + 1000) else USAGE_EVENTS_SHORT_LOOKBACK_MS
+            
+            val events = runCatching { usm.queryEvents(now - lookback, now) }.getOrNull()
+            if (events != null) {
+                val event = UsageEvents.Event()
+                var latest: TopActivity? = null
+                while (events.hasNextEvent()) {
+                    events.getNextEvent(event)
+                    if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
+                        latest = TopActivity(event.packageName, event.className, "UsageEvents")
+                    }
+                }
+                if (latest != null) return latest
             }
         }
-
-        return latest
+        val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        val top = runCatching { am.getRunningTasks(1).firstOrNull()?.topActivity }.getOrNull()
+        return TopActivity(top?.packageName, top?.className, "RunningTasks")
     }
 
-    private data class TopActivity(
-        val packageName: String?,
-        val className: String?,
-        val source: String
-    ) {
-        val displayName: String
-            get() = when {
-                packageName.isNullOrBlank() -> "unknown"
-                className.isNullOrBlank() -> packageName
-                else -> "$packageName/$className"
-            }
+    private data class TopActivity(val packageName: String?, val className: String?, val source: String) {
+        val displayName: String get() = packageName ?: "unknown"
     }
-
-    private data class WatchdogResult(
-        val action: String,
-        val topActivity: String,
-        val topSource: String
-    )
-
-    private companion object {
-    }
+    private data class WatchdogResult(val action: String, val topActivity: String, val topSource: String)
 }

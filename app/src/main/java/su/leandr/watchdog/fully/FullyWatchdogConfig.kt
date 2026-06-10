@@ -20,6 +20,7 @@ object FullyWatchdogConfig {
     const val EXTRA_INTERVAL_MS = "interval_ms"
     const val EXTRA_OVERRIDE_DEADLINE_MS = "override_deadline_ms"
     const val EXTRA_SOFT_RELAUNCH_MS = "soft_relaunch_ms"
+    const val EXTRA_MAX_MEMORY_MB = "max_memory_mb"
     const val EXTRA_SETTING_KEY = "setting_key"
     const val EXTRA_SETTING_VALUE = "setting_value"
 
@@ -30,6 +31,7 @@ object FullyWatchdogConfig {
 
     // 4 hours: long enough to not disturb users, short enough to preempt daily WebView leak
     const val DEFAULT_SOFT_RELAUNCH_INTERVAL_MS = 4 * 60 * 60 * 1000L
+    const val DEFAULT_MAX_MEMORY_MB = 250 // RESCUE: 250MB to prevent total system freeze
 
     // Storm protection — two tiers
     const val STORM_WINDOW_MS = 5 * 60 * 1000L
@@ -53,6 +55,7 @@ object FullyWatchdogConfig {
     const val PREF_INTERVAL_MS = "interval_ms"
     const val PREF_OVERRIDE_DEADLINE_MS = "override_deadline_ms"
     const val PREF_SOFT_RELAUNCH_MS = "soft_relaunch_ms"
+    const val PREF_MAX_MEMORY_MB = "max_memory_mb"
     const val PREF_LAST_START_ATTEMPTS = "last_start_attempts"
     const val PREF_LAST_KILL_ATTEMPTS = "last_kill_attempts"        // NEW: hard-kill storm counter
     const val PREF_LAST_START_ATTEMPTED_MS = "last_start_attempted_ms" // NEW: for repeat-fail detection
@@ -74,6 +77,7 @@ object FullyWatchdogConfig {
     const val PREF_STAT_ERRORS = "stat_errors"
     const val PREF_STAT_REBOOT_ATTEMPTS = "stat_reboot_attempts"
     const val PREF_STAT_CRASH_RESTARTS = "stat_crash_restarts"     // NEW: cold restarts after crash
+    const val PREF_STAT_MEM_RESTARTS = "stat_mem_restarts"         // NEW: restarts due to memory leak
     const val PREF_LAST_LOG_CLEAR_MS = "last_log_clear_ms"         // NEW: weekly log rotation timestamp
 
     // YaOS / Android TV system packages that shouldn't be interrupted by watchdog
