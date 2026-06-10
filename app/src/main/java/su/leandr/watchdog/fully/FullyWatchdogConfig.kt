@@ -84,7 +84,7 @@ object FullyWatchdogConfig {
     val SYSTEM_WHITELIST = setOf(
         "com.android.settings",
         "com.android.systemui",
-        // "com.spocky.projengmenu", // Projector engineering menu
+        // "com.spocky.projengmenu", // Projector engineering menu / Projectivy Launcher
         // "com.yandex.tv.launcher", // Yandex home
         "com.yandex.tv.setupwizard",
         "com.yandex.ott" // Yandex.TV app sometimes acts as home

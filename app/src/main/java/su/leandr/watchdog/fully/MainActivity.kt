@@ -732,25 +732,30 @@ fun DiagnosticRow(label: String, value: String, valueColor: Color = Color.White)
 
 fun rebootDevice(context: android.content.Context) {
     WatchdogSettings.increment(context, PREF_STAT_REBOOT_ATTEMPTS)
+    FileLogger.log(context, "!!! User requested RESTART via UI !!!", toFile = true)
 
+    // On YaOS / Android TV without root, a real 'reboot' usually fails or just powers off.
+    // We use "Rescue" instead: kill the target and force it to relaunch.
+    
     // Attempt 1: PowerManager.reboot() — works only if app is signed with system signature
     val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
     try {
         pm?.reboot(null)
-        return
     } catch (_: Exception) { }
 
-    // Attempt 2: plain shell (some TV firmwares allow it via "reboot" binary if permissions allow)
+    // Attempt 2: shell reboot (unlikely to work without root, but some firmwares have it open)
     try {
         Runtime.getRuntime().exec("reboot").waitFor()
     } catch (_: Exception) { }
 
-    // All attempts failed — guide the user
-    WatchdogSettings.increment(context, PREF_STAT_ERRORS)
-    val adbCmd = "adb shell reboot"
+    // Backup: Hard rescue (kill + start)
+    // We don't have direct access to fastKillTarget from here easily without making it static or using a singleton/job.
+    // So we just trigger a Job with a special reason.
+    FullyScheduler.schedule(context, delayMs = 0L, reason = "USER_RESTART_RESCUE")
+
     Toast.makeText(
         context,
-        "Reboot requires system privileges.\nRun via ADB:\n$adbCmd",
+        "System reboot requested. Performing soft rescue as fallback.",
         Toast.LENGTH_LONG
     ).show()
 }

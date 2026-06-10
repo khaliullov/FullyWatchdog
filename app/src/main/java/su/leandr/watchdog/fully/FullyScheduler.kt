@@ -11,7 +11,9 @@ object FullyScheduler {
     fun schedule(context: Context, delayMs: Long? = null, reason: String = "JOB", currentJobId: Int? = null): Int {
         val now = System.currentTimeMillis()
         val isRoutine = (reason == "JOB")
-        FileLogger.log(context, "--- Scheduler: start (reason=$reason, current=#$currentJobId) ---", toFile = !isRoutine)
+        
+        // Always log to file for debugging scheduler continuity
+        FileLogger.log(context, "--- Scheduler: schedule call (reason=$reason, current=#$currentJobId) ---", toFile = true)
         
         if (!WatchdogSettings.isEnabled(context)) {
             FileLogger.log(context, "Scheduler: DISABLED")
@@ -60,8 +62,8 @@ object FullyScheduler {
         val component = ComponentName(context, FullyWatchJob::class.java)
         
         // Margin for override deadline to prevent "stuck" jobs
-        // Use a generous deadline to allow the system some flexibility
-        val deadline = maxOf(finalDelay * 3, FullyWatchdogConfig.DEFAULT_WATCHDOG_OVERRIDE_DEADLINE_MS)
+        // Use a tighter deadline to force execution on TV systems
+        val deadline = baseDelay + 5000L
         
         return try {
             val jobInfo = JobInfo.Builder(nextId, component)
@@ -79,7 +81,7 @@ object FullyScheduler {
             // This prevents the "canceled" status that was killing the currently running job.
             // Ping-pong IDs naturally overwrite themselves in the scheduler queue.
             
-            FileLogger.log(context, "Scheduler: OK - #$nextId scheduled. Result=$result, delay=${finalDelay}ms", toFile = !isRoutine)
+            FileLogger.log(context, "Scheduler: OK - #$nextId scheduled. Result=$result, delay=${finalDelay}ms", toFile = true)
             result
         } catch (e: Exception) {
             FileLogger.log(context, "Scheduler: ERROR - ${e.message}")
