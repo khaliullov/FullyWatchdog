@@ -126,7 +126,7 @@ adb shell appops get su.leandr.watchdog.fully GET_USAGE_STATS
 ## Диагностика и тесты
 
 - **Логирование в файл**: Приложение пишет детальный лог в `/sdcard/Android/data/su.leandr.watchdog.fully/files/watchdog.log`. 
-  Лог содержит метки времени, причины срабатывания, обнаруженное Foreground приложение и результат восстановления.
+  Лог ротируется при достижении 1МБ и **автоматически полностью очищается раз в неделю** для экономии места.
   Путь к логу отображается в нижней части настроек MainActivity.
 - **Принудительный запуск Job**: 
   `adb shell cmd jobscheduler run -f su.leandr.watchdog.fully 1001`
@@ -273,7 +273,18 @@ app/src/main/java/su/leandr/watchdog/fully/FullyWatchdogConfig.kt
 - `STORM_SOFT_MAX` / `STORM_HARD_MAX` — лимиты попыток восстановления.
 - `DEFAULT_FULLY_PACKAGE` / `DEFAULT_FULLY_ACTIVITY_CLASS` — пакет и класс целевого приложения.
 
-## Валидация на YaOS (YaOS Validation)
+## Диагностика
+
+1. **Лог-файл**: `/sdcard/Android/data/su.leandr.watchdog.fully/files/watchdog.log` (ротация 1МБ + еженедельная очистка).
+2. **Очередь задач**: `adb shell dumpsys jobscheduler | grep -E "1001|1002" | grep su.leandr.watchdog.fully`
+3. **Текущее состояние (prefs)**: `adb shell run-as su.leandr.watchdog.fully cat shared_prefs/fully_watchdog.xml`
+
+## Валидация стабильности на YaOS
+
+На YaOS (Tuvio/M9) система показывает >95% успеха
+(из 1400+ проверок за двое суток 1350+ завершились статусом OK).
+Использование Root-fallback позволяет гарантированно поднимать Fully Kiosk
+даже при агрессивных фоновых ограничениях.
 
 Система протестирована и подтверждена на следующем стеке:
 

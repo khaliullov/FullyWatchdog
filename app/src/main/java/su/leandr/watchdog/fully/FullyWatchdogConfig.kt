@@ -3,7 +3,8 @@ package su.leandr.watchdog.fully
 object FullyWatchdogConfig {
     const val DEFAULT_FULLY_PACKAGE = "de.ozerov.fully"
     const val DEFAULT_FULLY_ACTIVITY_CLASS = "de.ozerov.fully.FullyActivity"
-    const val JOB_ID = 1001
+    const val JOB_ID_A = 1001
+    const val JOB_ID_B = 1002
     const val CONTROL_TOKEN = "fully-watchdog-2580"
 
     const val ACTION_ENABLE = "su.leandr.watchdog.fully.action.ENABLE"
@@ -73,13 +74,14 @@ object FullyWatchdogConfig {
     const val PREF_STAT_ERRORS = "stat_errors"
     const val PREF_STAT_REBOOT_ATTEMPTS = "stat_reboot_attempts"
     const val PREF_STAT_CRASH_RESTARTS = "stat_crash_restarts"     // NEW: cold restarts after crash
+    const val PREF_LAST_LOG_CLEAR_MS = "last_log_clear_ms"         // NEW: weekly log rotation timestamp
 
     // YaOS / Android TV system packages that shouldn't be interrupted by watchdog
     val SYSTEM_WHITELIST = setOf(
         "com.android.settings",
         "com.android.systemui",
-        // "com.spocky.projengmenu", // Projector launcher
-        // "com.yandex.tv.launcher", // Yandex launcher
+        // "com.spocky.projengmenu", // Projector engineering menu
+        // "com.yandex.tv.launcher", // Yandex home
         "com.yandex.tv.setupwizard",
         "com.yandex.ott" // Yandex.TV app sometimes acts as home
     )

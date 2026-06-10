@@ -36,7 +36,7 @@ class WatchdogControlReceiver : BroadcastReceiver() {
 
             ACTION_DISABLE -> {
                 WatchdogSettings.setEnabled(context, false)
-                FullyScheduler.cancel(context)
+                FullyScheduler.cancelAll(context)
                 "control: watchdog disabled"
             }
 
@@ -47,7 +47,7 @@ class WatchdogControlReceiver : BroadcastReceiver() {
                     FullyScheduler.schedule(context, delayMs = 0L, reason = "CONTROL:TOGGLE")
                     "control: watchdog toggled on"
                 } else {
-                    FullyScheduler.cancel(context)
+                    FullyScheduler.cancelAll(context)
                     "control: watchdog toggled off"
                 }
             }

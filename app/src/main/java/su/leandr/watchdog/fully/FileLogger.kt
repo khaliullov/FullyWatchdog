@@ -9,9 +9,17 @@ import java.util.*
 object FileLogger {
     private const val TAG = "FileLogger"
     private const val MAX_FILE_SIZE = 1 * 1024 * 1024 // 1MB
+    private const val WEEK_MS = 7 * 24 * 60 * 60 * 1000L
 
     fun log(context: Context, message: String) {
-        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+        val now = System.currentTimeMillis()
+        val prefs = context.getSharedPreferences(FullyWatchdogConfig.PREFS_NAME, Context.MODE_PRIVATE)
+        val lastClear = prefs.getLong(FullyWatchdogConfig.PREF_LAST_LOG_CLEAR_MS, 0L)
+
+        // Weekly rotation
+        val shouldClearWeekly = lastClear == 0L || (now - lastClear > WEEK_MS)
+        
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(now))
         val logLine = "[$timestamp] $message\n"
         
         // Also log to Logcat for convenience
@@ -21,7 +29,13 @@ object FileLogger {
             val logDir = context.getExternalFilesDir(null) ?: return
             val logFile = File(logDir, "watchdog.log")
             
-            // Basic rotation
+            if (shouldClearWeekly) {
+                if (logFile.exists()) logFile.delete()
+                prefs.edit().putLong(FullyWatchdogConfig.PREF_LAST_LOG_CLEAR_MS, now).apply()
+                logFile.appendText("[$timestamp] --- Weekly log reset ---\n")
+            }
+
+            // Basic size-based rotation (as secondary protection)
             if (logFile.exists() && logFile.length() > MAX_FILE_SIZE) {
                 val oldFile = File(logDir, "watchdog.log.1")
                 if (oldFile.exists()) oldFile.delete()

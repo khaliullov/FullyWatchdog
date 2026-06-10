@@ -35,10 +35,13 @@ import su.leandr.watchdog.fully.FullyWatchdogConfig.USAGE_EVENTS_LONG_LOOKBACK_M
 class FullyWatchJob : JobService() {
     override fun onStartJob(params: JobParameters?): Boolean {
         if (!WatchdogSettings.isEnabled(this)) {
-            FullyScheduler.cancel(this)
+            FullyScheduler.cancelAll(this)
             jobFinished(params, false)
             return false
         }
+
+        // Schedule NEXT job immediately to ensure continuity even if this process is killed
+        FullyScheduler.schedule(this)
 
         Thread {
             try {
@@ -54,10 +57,6 @@ class FullyWatchJob : JobService() {
                     }
 
                 FileLogger.log(this, "Final Result: ${result.action} | Top: ${result.topActivity}")
-
-                if (WatchdogSettings.isEnabled(this)) {
-                    FullyScheduler.schedule(this)
-                }
             } finally {
                 jobFinished(params, false)
             }

@@ -52,6 +52,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        FileLogger.log(this, "MainActivity: onCreate")
+        
+        // Ensure scheduler is active whenever UI is opened
+        if (WatchdogSettings.isEnabled(this)) {
+            FileLogger.log(this, "MainActivity: auto-scheduling on launch")
+            FullyScheduler.schedule(this, reason = "UI_LAUNCH")
+        }
+
         val isDebugIntent = intent?.action == "su.leandr.watchdog.fully.action.DEBUG" ||
                 intent?.getBooleanExtra("debug", false) == true
 
@@ -351,7 +359,7 @@ fun WatchdogScreen() {
                     if (nextEnabled) {
                         FullyScheduler.schedule(context, delayMs = 0L)
                     } else {
-                        FullyScheduler.cancel(context)
+                        FullyScheduler.cancelAll(context)
                     }
                     // Update state immediately so button and badge re-compose
                     enabled = nextEnabled
