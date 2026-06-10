@@ -66,13 +66,21 @@ class FullyWatchJob : JobService() {
         // Deadman Switch: If the system was so stuck that we missed multiple cycles, reboot.
         val lastCheck = prefs.getLong(FullyWatchdogConfig.PREF_LAST_CHECK_MS, 0L)
         val interval = WatchdogSettings.intervalMs(this)
-        val deadmanThreshold = maxOf(60000L, interval * 3)
+        val deadmanThreshold = maxOf(60000L, interval * 5)
         
         if (lastCheck > 0 && (now - lastCheck) > deadmanThreshold) {
-            FileLogger.log(this, "DEADMAN: Last check was ${(now - lastCheck)/1000}s ago (threshold ${deadmanThreshold/1000}s). System is frozen. Rebooting.")
-            // Update timestamp even before reboot to avoid instant reboot loop if reboot fails
+            FileLogger.log(this, "DEADMAN: System was frozen for ${(now - lastCheck) / 1000}s. Performing emergency cleanup instead of reboot.")
+            // Update timestamp to stop the panic
             prefs.edit().putLong(FullyWatchdogConfig.PREF_LAST_CHECK_MS, now).apply()
-            rebootDevice(this)
+
+            // Try to kill background apps to free up system resources
+            am.runningAppProcesses?.forEach {
+                if (it.processName != packageName && it.processName != target) {
+                    runCatching { am.killBackgroundProcesses(it.processName) }
+                }
+            }
+
+            fastKillTarget(target)
             return
         }
         
