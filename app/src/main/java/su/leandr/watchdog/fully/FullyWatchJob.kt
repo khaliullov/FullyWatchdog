@@ -597,7 +597,9 @@ class FullyWatchJob : JobService() {
     private fun detectTopActivity(): TopActivity {
         val usm = getSystemService(USAGE_STATS_SERVICE) as UsageStatsManager
         val now = System.currentTimeMillis()
-        val lookback = 5 * 60_000L 
+        // Use 24h lookback to ensure we find the last foreground transition, 
+        // preventing the "5-minute fallback" to unreliable RunningTasks.
+        val lookback = FullyWatchdogConfig.USAGE_EVENTS_LONG_LOOKBACK_MS
         
         val events = runCatching { usm.queryEvents(now - lookback, now) }.getOrNull()
         if (events != null) {
@@ -605,11 +607,20 @@ class FullyWatchJob : JobService() {
             var latest: TopActivity? = null
             while (events.hasNextEvent()) {
                 events.getNextEvent(event)
-                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
+                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND || event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
                     latest = TopActivity(event.packageName, event.className, "UsageEvents")
                 }
             }
             if (latest != null) return latest
+        }
+
+        // Fallback 2: UsageStats (Last Time Used). This is more persistent than Events buffer.
+        val stats = runCatching { usm.queryUsageStats(UsageStatsManager.INTERVAL_BEST, now - lookback, now) }.getOrNull()
+        if (!stats.isNullOrEmpty()) {
+            val latest = stats.filter { it.lastTimeUsed > 0 }.maxByOrNull { it.lastTimeUsed }
+            if (latest != null) {
+                return TopActivity(latest.packageName, null, "UsageStats")
+            }
         }
         
         val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
