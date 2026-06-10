@@ -200,7 +200,27 @@ app/src/main/java/su/leandr/watchdog/fully/FullyWatchdogConfig.kt
   adb shell am broadcast -n su.leandr.watchdog.fully/.WatchdogControlReceiver -a su.leandr.watchdog.fully.action.RUN_NOW --es token fully-watchdog-2580
   ```
 
-Команда включает watchdog, если он был выключен, и планирует job с нулевой задержкой.
+  Команда включает watchdog, если он был выключен, и планирует job с нулевой задержкой.
+
+- **Симуляция утечки памяти (Memory Leak Test)**:
+
+  ```bash
+  adb shell am broadcast \
+    -n su.leandr.watchdog.fully/.WatchdogControlReceiver \
+    -a su.leandr.watchdog.fully.action.RUN_NOW \
+    --es token fully-watchdog-2580 \
+    --es reason DEBUG:SIMULATE_LEAK
+  ```
+
+  Заставляет Watchdog считать, что приложение превысило лимит памяти, что приведет к Hard Kill (`force-stop`) и перезапуску.
+
+- **Принудительно убить и перезапустить Fully (Hard Kill)**:
+
+  ```bash
+  adb shell am broadcast -n su.leandr.watchdog.fully/.WatchdogControlReceiver -a su.leandr.watchdog.fully.action.KILL_FULLY --es token fully-watchdog-2580
+  ```
+
+  Команда принудительно завершает процесс Fully (`pkill -9` + `am force-stop`) и немедленно инициирует его запуск. Полезно для тестирования механизмов восстановления или при "зависании" контента внутри WebView.
 
 ### Изменить настройки watchdog
 

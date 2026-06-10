@@ -13,6 +13,7 @@ object FullyWatchdogConfig {
     const val ACTION_RUN_NOW = "su.leandr.watchdog.fully.action.RUN_NOW"
     const val ACTION_SET_CONFIG = "su.leandr.watchdog.fully.action.SET_CONFIG"
     const val ACTION_PUT_SYSTEM_SETTING = "su.leandr.watchdog.fully.action.PUT_SYSTEM_SETTING"
+    const val ACTION_KILL_FULLY = "su.leandr.watchdog.fully.action.KILL_FULLY"
 
     const val EXTRA_TOKEN = "token"
     const val EXTRA_FULLY_PACKAGE = "fully_package"
@@ -21,6 +22,7 @@ object FullyWatchdogConfig {
     const val EXTRA_OVERRIDE_DEADLINE_MS = "override_deadline_ms"
     const val EXTRA_SOFT_RELAUNCH_MS = "soft_relaunch_ms"
     const val EXTRA_MAX_MEMORY_MB = "max_memory_mb"
+    const val EXTRA_REASON = "reason"
     const val EXTRA_SETTING_KEY = "setting_key"
     const val EXTRA_SETTING_VALUE = "setting_value"
 
@@ -84,9 +86,14 @@ object FullyWatchdogConfig {
     val SYSTEM_WHITELIST = setOf(
         "com.android.settings",
         "com.android.systemui",
-        // "com.spocky.projengmenu", // Projector engineering menu / Projectivy Launcher
-        // "com.yandex.tv.launcher", // Yandex home
-        "com.yandex.tv.setupwizard",
-        "com.yandex.ott" // Yandex.TV app sometimes acts as home
+        // "com.spocky.projengmenu",    // Projector engineering menu / Projectivy Launcher
+        // "com.yandex.tv.home",        // Yandex Home / Launcher on YaOS
+        // "com.yandex.tv.launcher",    // Legacy Yandex home
+        "com.yandex.tv.setupwizard", // Initial setup
+        "com.yandex.tv.alice",       // Alice Voice Assistant / Global Search
+        "com.yandex.tv.services",    // Core services
+        "com.yandex.ott",            // Kinopoisk / Yandex.TV app
+        "com.yandex.tv.settings",    // System settings
+        // "com.yandex.browser.tv"      // System browser
     )
 }

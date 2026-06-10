@@ -6,6 +6,7 @@ import android.content.Intent
 import android.provider.Settings
 import su.leandr.watchdog.fully.FullyWatchdogConfig.ACTION_DISABLE
 import su.leandr.watchdog.fully.FullyWatchdogConfig.ACTION_ENABLE
+import su.leandr.watchdog.fully.FullyWatchdogConfig.ACTION_KILL_FULLY
 import su.leandr.watchdog.fully.FullyWatchdogConfig.ACTION_PUT_SYSTEM_SETTING
 import su.leandr.watchdog.fully.FullyWatchdogConfig.ACTION_RUN_NOW
 import su.leandr.watchdog.fully.FullyWatchdogConfig.ACTION_SET_CONFIG
@@ -13,6 +14,7 @@ import su.leandr.watchdog.fully.FullyWatchdogConfig.ACTION_TOGGLE
 import su.leandr.watchdog.fully.FullyWatchdogConfig.CONTROL_TOKEN
 import su.leandr.watchdog.fully.FullyWatchdogConfig.EXTRA_INTERVAL_MS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.EXTRA_OVERRIDE_DEADLINE_MS
+import su.leandr.watchdog.fully.FullyWatchdogConfig.EXTRA_REASON
 import su.leandr.watchdog.fully.FullyWatchdogConfig.EXTRA_SOFT_RELAUNCH_MS
 import su.leandr.watchdog.fully.FullyWatchdogConfig.EXTRA_SETTING_KEY
 import su.leandr.watchdog.fully.FullyWatchdogConfig.EXTRA_SETTING_VALUE
@@ -53,8 +55,15 @@ class WatchdogControlReceiver : BroadcastReceiver() {
             }
 
             ACTION_RUN_NOW -> {
-                FullyScheduler.schedule(context, delayMs = 0L, reason = "CONTROL:RUN_NOW")
-                "control: watchdog run requested"
+                val reason = intent.getStringExtra(EXTRA_REASON) ?: "CONTROL:RUN_NOW"
+                FullyScheduler.schedule(context, delayMs = 0L, reason = reason)
+                "control: watchdog run requested (reason=$reason)"
+            }
+
+            ACTION_KILL_FULLY -> {
+                val pkg = WatchdogSettings.fullyPackage(context)
+                FullyScheduler.schedule(context, delayMs = 0L, reason = "CONTROL:KILL")
+                "control: requested kill and restart for $pkg"
             }
 
             ACTION_SET_CONFIG -> {

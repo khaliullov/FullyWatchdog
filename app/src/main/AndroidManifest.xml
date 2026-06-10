@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.GET_TASKS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -73,6 +74,7 @@
                 <action android:name="su.leandr.watchdog.fully.action.RUN_NOW" />
                 <action android:name="su.leandr.watchdog.fully.action.SET_CONFIG" />
                 <action android:name="su.leandr.watchdog.fully.action.PUT_SYSTEM_SETTING" />
+                <action android:name="su.leandr.watchdog.fully.action.KILL_FULLY" />
             </intent-filter>
         </receiver>
     </application>
