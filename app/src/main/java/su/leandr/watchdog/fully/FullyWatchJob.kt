@@ -32,20 +32,21 @@ class FullyWatchJob : JobService() {
         val jobId = params?.jobId ?: -1
         val reason = params?.extras?.getString(FullyWatchdogConfig.EXTRA_REASON) ?: "JOB"
         
-        if (activeJobId != -1 && activeJobId != jobId) {
-            FileLogger.log(this, "!!! Job #$jobId: BLOCKED by #$activeJobId !!!", toFile = true)
-            // Reschedule to ensure the chain continues even if this specific instance is blocked
-            FullyScheduler.schedule(this, currentJobId = jobId, reason = "RECOVERY_FROM_BLOCK")
-            jobFinished(params, false)
-            return false
+        synchronized(FullyWatchJob) {
+            if (activeJobId != -1 && activeJobId != jobId) {
+                FileLogger.log(this, "!!! Job #$jobId: BLOCKED by #$activeJobId (reason=$reason) !!!", toFile = true)
+                jobFinished(params, false)
+                return false
+            }
+            activeJobId = jobId
         }
-        activeJobId = jobId
 
         // Immediate log to track scheduler health
         FileLogger.log(this, "--- Job Execution Start: #$jobId (reason=$reason) ---", toFile = true)
 
         if (!WatchdogSettings.isEnabled(this)) {
             FileLogger.log(this, "Job #$jobId: Watchdog disabled, stopping.")
+            synchronized(FullyWatchJob) { if (activeJobId == jobId) activeJobId = -1 }
             jobFinished(params, false)
             return false
         }
@@ -56,11 +57,13 @@ class FullyWatchJob : JobService() {
             } catch (e: Exception) {
                 FileLogger.log(this, "Job #$jobId Error: ${e.message}")
             } finally {
-                if (activeJobId == jobId) activeJobId = -1
+                val shouldReschedule = synchronized(FullyWatchJob) {
+                    val wasActive = (activeJobId == jobId)
+                    if (wasActive) activeJobId = -1
+                    wasActive // Only reschedule if we weren't stopped by system/blocked
+                }
                 
-                // Next job in chain always defaults to "JOB" reason.
-                // Moved here to the end of execution to avoid resource/log competition.
-                if (WatchdogSettings.isEnabled(this)) {
+                if (shouldReschedule && WatchdogSettings.isEnabled(this)) {
                     FullyScheduler.schedule(this, currentJobId = jobId, reason = "JOB")
                 }
 
