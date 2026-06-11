@@ -38,16 +38,22 @@ object FileLogger {
                 val logFile = File(logDir, "watchdog.log")
                 
                 if (shouldClearWeekly) {
-                    if (logFile.exists()) logFile.delete()
+                    if (logFile.exists()) {
+                        logFile.appendText("[$timestamp] --- Weekly log reset ---\n")
+                        logFile.delete()
+                    }
                     prefs.edit().putLong(FullyWatchdogConfig.PREF_LAST_LOG_CLEAR_MS, now).apply()
-                    logFile.appendText("[$timestamp] --- Weekly log reset ---\n")
+                    logFile.appendText("[$timestamp] --- Weekly log reset (new file) ---\n")
                 }
 
                 // Basic size-based rotation
                 if (logFile.exists() && logFile.length() > MAX_FILE_SIZE) {
+                    logFile.appendText("[$timestamp] --- Log rotation (size limit exceeded) ---\n")
                     val oldFile = File(logDir, "watchdog.log.1")
                     if (oldFile.exists()) oldFile.delete()
-                    logFile.renameTo(oldFile)
+                    if (logFile.renameTo(oldFile)) {
+                        logFile.appendText("[$timestamp] --- Log rotation (new file) ---\n")
+                    }
                 }
                 
                 logFile.appendText(logLine)

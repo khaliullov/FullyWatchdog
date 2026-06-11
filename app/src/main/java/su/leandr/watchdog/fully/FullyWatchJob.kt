@@ -92,81 +92,105 @@ class FullyWatchJob : JobService() {
         val memStatsStr = "[RAM: ${usedMb}MB/Free: ${availMb}MB]"
 
         val target = WatchdogSettings.fullyPackage(this).trim()
-        
-        // 1. Get PIDs first
         val pids = getAllPids(target)
-        
-        // 2. Get Memory usage. Aggregate across all processes (main, remote, webview)
-        var targetPssMb = 0
-        
-        // TEST MODE: If a specific trigger is set, simulate a leak
-        if (triggerReason == "DEBUG:SIMULATE_LEAK") {
-            targetPssMb = WatchdogSettings.maxMemoryMb(this) + 50
-            FileLogger.log(this, "[#$jobId] DEBUG: Simulating memory leak (${targetPssMb}MB)", toFile = true)
-        } else if (pids.isNotEmpty()) {
-            for (p in pids) {
-                val pss = getPssFromAm(p)
-                if (pss > 0) targetPssMb += pss
+        val targetPssMb = if (triggerReason == "DEBUG:SIMULATE_LEAK") {
+            val simulated = WatchdogSettings.maxMemoryMb(this) + 50
+            FileLogger.log(this, "[#$jobId] DEBUG: Simulating memory leak (${simulated}MB)", toFile = true)
+            simulated
+        } else {
+            var pss = getPssViaDumpsys(target)
+            
+            // Fallback: Sum up per-PID if package-wide failed or returned 0
+            if (pss <= 0 && pids.isNotEmpty()) {
+                var sum = 0
+                for (p in pids) {
+                    val pssFromAm = getPssFromAm(p)
+                    if (pssFromAm > 0) {
+                        sum += pssFromAm
+                    } else {
+                        val pssDump = getPssViaDumpsys(target, p)
+                        if (pssDump > 0) sum += pssDump
+                    }
+                }
+                if (sum > 0) pss = sum
             }
+            pss
         }
 
-        // Fallback to dumpsys if AM returned nothing or as a cross-check for YaOS
-        if (targetPssMb <= 0) {
-            targetPssMb = getPssViaDumpsys(target, -1)
-        }
+        FileLogger.log(this, "[#$jobId] Stats: $memStatsStr | App Total: ${if (targetPssMb > 0) "${targetPssMb}MB" else "N/A"} (pids=${pids.joinToString()})", toFile = true)
 
-        FileLogger.log(this, "[#$jobId] Stats: $memStatsStr | App Total: ${if (targetPssMb >= 0) "${targetPssMb}MB" else "N/A"} (pids=${pids.joinToString()})", toFile = true)
+        // Update last known memory stats for UI
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+            .putInt(FullyWatchdogConfig.PREF_LAST_APP_MEM_MB, targetPssMb)
+            .putInt(FullyWatchdogConfig.PREF_LAST_FREE_MEM_MB, availMb)
+            .apply()
 
+        val topActivity = detectTopActivity()
         val now = System.currentTimeMillis()
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         
-        if (triggerReason == "CONTROL:KILL") {
-            fastKillTarget(target, "User requested kill")
-            return
-        }
-
-        val lastCheck = prefs.getLong(PREF_LAST_CHECK_MS, 0L)
-        val interval = WatchdogSettings.intervalMs(this)
-        val deadmanThreshold = maxOf(60000L, interval * 10) // 10 missed checks instead of 5
-        val deadmanLimit = 2 * 3600_000L // 2 hours
-        
-        if (lastCheck > 0 && (now - lastCheck) in (deadmanThreshold + 1) until deadmanLimit) {
-            FileLogger.log(this, "[#$jobId] DEADMAN: Frozen for ${(now - lastCheck) / 1000}s. Cleaning up.", toFile = true)
-            prefs.edit().putLong(PREF_LAST_CHECK_MS, now).apply()
+        val resultDetail: String = when {
+            triggerReason == "CONTROL:KILL" -> {
+                fastKillTarget(target, "User requested kill")
+                "killed (control)"
+            }
             
-            am.runningAppProcesses?.forEach {
-                if (it.processName != packageName && it.processName != target) {
-                    runCatching { am.killBackgroundProcesses(it.processName) }
+            triggerReason == "USER_RESTART_RESCUE" -> {
+                fastKillTarget(target, "User rescue request")
+                "restarted (user rescue)"
+            }
+
+            else -> {
+                val lastCheck = prefs.getLong(PREF_LAST_CHECK_MS, 0L)
+                val interval = WatchdogSettings.intervalMs(this)
+                val deadmanThreshold = maxOf(60000L, interval * 10)
+                val deadmanLimit = 2 * 3600_000L 
+                
+                if (lastCheck > 0 && (now - lastCheck) in (deadmanThreshold + 1) until deadmanLimit) {
+                    FileLogger.log(this, "[#$jobId] DEADMAN: Frozen for ${(now - lastCheck) / 1000}s. Cleaning up.", toFile = true)
+                    prefs.edit().putLong(PREF_LAST_CHECK_MS, now).apply()
+                    am.runningAppProcesses?.forEach {
+                        if (it.processName != packageName && it.processName != target) {
+                            runCatching { am.killBackgroundProcesses(it.processName) }
+                        }
+                    }
+                    fastKillTarget(target, "Deadman rescue")
+                    "restarted (deadman)"
+                } else {
+                    prefs.edit().putLong(PREF_LAST_CHECK_MS, now).apply()
+
+                    val maxMb = WatchdogSettings.maxMemoryMb(this)
+                    val minFreeMb = WatchdogSettings.minFreeMemoryMb(this)
+                    when {
+                        memInfo.lowMemory || availMb < minFreeMb -> {
+                            fastKillTarget(target, "Low memory panic")
+                            WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
+                            "restarted (low memory)"
+                        }
+                        maxMb in 1 until targetPssMb -> {
+                            fastKillTarget(target, "Memory limit exceeded")
+                            WatchdogSettings.increment(this, FullyWatchdogConfig.PREF_STAT_MEM_RESTARTS)
+                            WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
+                            "restarted (memory limit)"
+                        }
+                        else -> {
+                            checkAndRecoverFully(jobId, triggerReason, memStatsStr, topActivity)
+                        }
+                    }
                 }
             }
-            fastKillTarget(target, "Deadman rescue")
-            return
-        }
-        
-        prefs.edit().putLong(PREF_LAST_CHECK_MS, now).apply()
-
-        if (memInfo.lowMemory || availMb < 200) {
-            FileLogger.log(this, "[#$jobId] PANIC: Low memory $memStatsStr. Killing $target.")
-            fastKillTarget(target, "Low memory panic")
-            WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
-            return
         }
 
-        val maxMb = WatchdogSettings.maxMemoryMb(this)
-        if (maxMb in 1 until targetPssMb) {
-            FileLogger.log(this, "[#$jobId] Memory Limit: ${targetPssMb}MB > ${maxMb}MB. Restarting.")
-            fastKillTarget(target, "Memory limit exceeded")
-            WatchdogSettings.increment(this, FullyWatchdogConfig.PREF_STAT_MEM_RESTARTS)
-            WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
-            return
-        }
+        val currentTop = topActivity.packageName ?: "null"
+        val isFullyOnTop = currentTop.equals(target, ignoreCase = true)
+        val isSystemOnTop = FullyWatchdogConfig.SYSTEM_WHITELIST.any { it.equals(currentTop, ignoreCase = true) }
 
-        runCatching { checkAndRecoverFully(jobId, triggerReason, memStatsStr) }
+        val finalLog = "[#$jobId] Final Result: $resultDetail | Top: ${topActivity.packageName}/${topActivity.className} (${topActivity.source}) | FullyOnTop=$isFullyOnTop | SystemOnTop=$isSystemOnTop"
+        FileLogger.log(this, finalLog, toFile = true)
     }
 
-    private fun checkAndRecoverFully(jobId: Int, triggerReason: String, memStatsStr: String) {
+    private fun checkAndRecoverFully(jobId: Int, triggerReason: String, memStatsStr: String, topActivity: TopActivity): String {
         WatchdogSettings.increment(this, PREF_STAT_CHECKS)
-        val topActivity = detectTopActivity()
         val targetPackage = WatchdogSettings.fullyPackage(this).trim()
         val currentTop = topActivity.packageName?.trim() ?: "null"
         
@@ -178,54 +202,34 @@ class FullyWatchJob : JobService() {
         val lastSoftRelaunchMs = prefs.getLong(PREF_LAST_SOFT_RELAUNCH_MS, 0L)
         val softRelaunchMs = WatchdogSettings.softRelaunchMs(this)
 
-        var resultDetail: String
-        val action = when {
-            triggerReason == "USER_RESTART_RESCUE" -> {
-                fastKillTarget(targetPackage, "User rescue request")
-                resultDetail = "user rescue"
-                "user rescue"
-            }
-            currentTop == packageName -> {
-                resultDetail = "skip: self"
-                "skip: self"
-            }
-            isSystemOnTop -> {
-                resultDetail = "skip: system"
-                "skip: system"
-            }
+        return when {
+            currentTop == packageName -> "skip: self"
+            isSystemOnTop -> "skip: system"
             isFullyOnTop -> {
-                WatchdogSettings.increment(this, PREF_STAT_OK)
                 if (softRelaunchMs > 0L && now - lastSoftRelaunchMs >= softRelaunchMs) {
                     prefs.edit().putLong(PREF_LAST_SOFT_RELAUNCH_MS, now).apply()
-                    resultDetail = "ok $memStatsStr (soft relaunch deferred)"
-                    null
+                    fastKillTarget(targetPackage, "Periodic soft relaunch")
+                    WatchdogSettings.increment(this, FullyWatchdogConfig.PREF_STAT_SOFT_RELAUNCHES)
+                    "soft relaunch"
                 } else {
-                    resultDetail = "ok $memStatsStr"
-                    null
+                    WatchdogSettings.increment(this, PREF_STAT_OK)
+                    "ok $memStatsStr"
                 }
             }
             else -> {
-                if (isFullyProcessAlive() && (now - WatchdogSettings.lastStartAttemptedMs(this) < 60000)) {
+                val isAlive = isFullyProcessAlive()
+                if (isAlive && (now - WatchdogSettings.lastStartAttemptedMs(this) < 60000)) {
                     fastKillTarget(targetPackage, "Hard recovery (loop protection)")
-                    resultDetail = "hard recovery"
+                    WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
                     "hard recovery"
                 } else {
-                    val clean = !isFullyProcessAlive()
+                    val clean = !isAlive
                     val startReason = if (clean) "Process not running" else "App not in foreground (top: $currentTop)"
                     val res = tryStartFully(cleanStart = clean, reason = startReason)
-                    resultDetail = "$res ($startReason)"
-                    res
+                    if (res == "started") WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
+                    "$res ($startReason)"
                 }
             }
-        }
-        
-        val logMessage = "[#$jobId] Final Result: $resultDetail | Top: ${topActivity.packageName}/${topActivity.className} (${topActivity.source}) | FullyOnTop=$isFullyOnTop | SystemOnTop=$isSystemOnTop"
-        
-        // Log EVERYTHING to file for better visibility
-        FileLogger.log(this, logMessage, toFile = true)
-
-        if (action != null && action != "skip: self" && action != "skip: system") {
-            WatchdogSettings.increment(this, PREF_STAT_TOTAL_RELAUNCHES)
         }
     }
 
@@ -245,12 +249,12 @@ class FullyWatchJob : JobService() {
         val pids = getAllPids(packageName)
         if (pids.isNotEmpty()) {
             pids.forEach { pid ->
-                executeShell("kill -9 $pid", root = isRoot)
+                executeShell("kill -9 $pid", root = isRoot, timeoutMs = 2000)
             }
         }
         
-        executeShell("am force-stop $packageName", root = isRoot)
-        executeShell("am crash $packageName", root = isRoot)
+        executeShell("am force-stop $packageName", root = isRoot, timeoutMs = 5000)
+        executeShell("am crash $packageName", root = isRoot, timeoutMs = 5000)
         
         // 2. Fallback to official API
         runCatching { (getSystemService(ACTIVITY_SERVICE) as ActivityManager).killBackgroundProcesses(packageName) }
@@ -258,11 +262,11 @@ class FullyWatchJob : JobService() {
         // 3. ADB Fallback (Local ADB Shell)
         if (!isRoot && isFullyProcessAlive()) {
             FileLogger.log(this, "Standard kill failed or incomplete, trying Local ADB Shell...", toFile = true)
-            executeAdbCommand("shell:am force-stop $packageName")
-            executeAdbCommand("shell:am crash $packageName")
+            executeAdbCommand("shell:am force-stop $packageName", timeoutMs = 8000)
+            executeAdbCommand("shell:am crash $packageName", timeoutMs = 8000)
         }
         
-        Thread.sleep(2000) 
+        try { Thread.sleep(2000) } catch (e: Exception) {}
         val stillAlive = isFullyProcessAlive(lookbackMs = 2000) // Tight window for verification
         FileLogger.log(this, "Kill verification: stillAlive=$stillAlive", toFile = true)
         
@@ -291,32 +295,52 @@ class FullyWatchJob : JobService() {
         
         fun parsePss(output: String?): Int {
             if (output.isNullOrBlank()) return -1
-            var pss = -1
+            var totalPssKb = 0
+            var foundAny = false
             output.lines().forEach { line ->
                 val l = line.trim()
-                // Try "TOTAL PSS: 1234" or "TOTAL: 1234"
-                if (l.contains("TOTAL PSS:", ignoreCase = true) || l.contains("TOTAL:", ignoreCase = true)) {
+                // Only take lines that start with TOTAL: or TOTAL PSS: 
+                // In aggregated dumpsys, the last TOTAL: is the sum of all processes
+                if (l.startsWith("TOTAL:", ignoreCase = true) || l.startsWith("TOTAL PSS:", ignoreCase = true)) {
                     val pPart = l.substringAfter(":").trim().split(Regex("\\s+"))[0].replace(",", "").toIntOrNull()
-                    if (pPart != null && pPart > 0) pss = pPart
+                    if (pPart != null && pPart > 0) {
+                        totalPssKb = pPart // Keep overwriting to get the LAST occurrence (the aggregate)
+                        foundAny = true
+                    }
                 }
-                // Fallback to "TOTAL  1234  5678 ..."
-                if (pss <= 0 && l.startsWith("TOTAL") && l.split(Regex("\\s+")).size > 1) {
-                    val pPart = l.substringAfter("TOTAL").trim().split(Regex("\\s+"))[0].replace(",", "").toIntOrNull()
-                    if (pPart != null && pPart > 0) pss = pPart
+                // Fallback for older Android versions or specific dumpsys formats
+                else if (l.startsWith("TOTAL") && l.split(Regex("\\s+")).size > 1 && !foundAny) {
+                    val parts = l.split(Regex("\\s+"))
+                    val pPart = parts[1].replace(",", "").toIntOrNull()
+                    if (pPart != null && pPart > 0) {
+                        totalPssKb = pPart
+                        foundAny = true
+                    }
                 }
             }
-            return if (pss > 0) pss / 1024 else -1
+            return if (foundAny) totalPssKb / 1024 else -1
         }
 
-        // 1. Try regular shell (fastest)
+        // 1. Try regular shell (fastest) with 5s timeout
         var result = try {
             val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", "dumpsys meminfo $query"))
-            parsePss(p.inputStream.bufferedReader().readText())
+            val finished = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                p.waitFor(5000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } else {
+                p.waitFor()
+                true
+            }
+            if (finished) {
+                parsePss(p.inputStream.bufferedReader().readText())
+            } else {
+                p.destroy()
+                -1
+            }
         } catch (e: Exception) { -1 }
 
         // 2. Try Local ADB (bypasses restrictions on Android 11+)
         if (result <= 0) {
-            val adbOutput = executeAdbCommand("shell:dumpsys meminfo $query")
+            val adbOutput = executeAdbCommand("shell:dumpsys meminfo $query", timeoutMs = 10000)
             result = parsePss(adbOutput)
         }
         
@@ -363,34 +387,63 @@ class FullyWatchJob : JobService() {
         // 2. cmd activity dump processes
         runCatching {
             val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", "cmd activity dump processes $packageName"))
-            p.inputStream.bufferedReader().useLines { lines ->
-                for (line in lines) {
-                    if (line.contains("PID #")) {
-                        val pid = line.substringAfter("PID #").trim().split(Regex("[:\\s]"))[0].toIntOrNull()
-                        if (pid != null && pid > 0) pids.add(pid)
+            val finished = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                p.waitFor(3000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } else {
+                p.waitFor()
+                true
+            }
+            if (finished) {
+                p.inputStream.bufferedReader().useLines { lines ->
+                    for (line in lines) {
+                        if (line.contains("PID #")) {
+                            val pid = line.substringAfter("PID #").trim().split(Regex("[:\\s]"))[0].toIntOrNull()
+                            if (pid != null && pid > 0) pids.add(pid)
+                        }
                     }
                 }
+            } else {
+                p.destroy()
             }
         }
 
         // 3. ps -A
         runCatching {
             val p = Runtime.getRuntime().exec(arrayOf("ps", "-A"))
-            p.inputStream.bufferedReader().useLines { lines ->
-                for (line in lines) {
-                    if (line.contains(packageName) && !line.contains(this.packageName)) {
-                        val parts = line.trim().split(Regex("\\s+"))
-                        if (parts.size > 1) {
-                            val pid = parts[1].toIntOrNull()
-                            if (pid != null && pid > 1) pids.add(pid)
+            val finished = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                p.waitFor(3000, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } else {
+                p.waitFor()
+                true
+            }
+            if (finished) {
+                p.inputStream.bufferedReader().useLines { lines ->
+                    for (line in lines) {
+                        if (line.contains(packageName) && !line.contains(this.packageName)) {
+                            val parts = line.trim().split(Regex("\\s+"))
+                            if (parts.size > 1) {
+                                val pid = parts[1].toIntOrNull()
+                                if (pid != null && pid > 1) pids.add(pid)
+                            }
                         }
                     }
                 }
+            } else {
+                p.destroy()
             }
         }
 
         // 4. Fallback via Local ADB (if enabled)
-        executeAdbCommand("shell:pidof $packageName")?.trim()?.split(Regex("\\s+"))?.forEach {
+        executeAdbCommand("shell:ps -A", timeoutMs = 5000)?.lines()?.forEach { line ->
+            if (line.contains(packageName) && !line.contains(this.packageName)) {
+                val parts = line.trim().split(Regex("\\s+"))
+                if (parts.size > 1) {
+                    val pid = parts[1].toIntOrNull()
+                    if (pid != null && pid > 1) pids.add(pid)
+                }
+            }
+        }
+        executeAdbCommand("shell:pidof $packageName", timeoutMs = 3000)?.trim()?.split(Regex("\\s+"))?.forEach {
             it.toIntOrNull()?.let { pid -> if (pid > 0) pids.add(pid) }
         }
 
@@ -410,55 +463,73 @@ class FullyWatchJob : JobService() {
         return cachedHasRoot == true
     }
 
-    private fun executeShell(command: String, root: Boolean = false): Int {
-        return try {
-            val p = if (root) {
-                Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-            } else {
-                Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
-            }
-            val exitCode = p.waitFor()
-            
-            if (exitCode != 0) {
-                val err = p.errorStream.bufferedReader(Charsets.UTF_8).readText().trim()
-                if (err.isNotEmpty()) FileLogger.log(this, "Shell Err ($exitCode): $err for $command")
-            }
-
-            if (exitCode != 0 && command.startsWith("am ")) {
-                val fallbackCommand = if (command.startsWith("am ")) command.replaceFirst("am ", "cmd activity ") else command
-                if (fallbackCommand != command) {
-                    FileLogger.log(this, "Shell: 'am' failed ($exitCode), trying fallback: $fallbackCommand")
-                    
-                    val secondP = if (root) {
-                        Runtime.getRuntime().exec(arrayOf("su", "-c", fallbackCommand))
-                    } else {
-                        Runtime.getRuntime().exec(arrayOf("sh", "-c", fallbackCommand))
-                    }
-                    val secondCode = secondP.waitFor()
-                    if (secondCode == 0) return 0
+    private fun executeShell(command: String, root: Boolean = false, timeoutMs: Long = 10000): Int {
+        fun runInternal(cmd: String): Int {
+            return try {
+                val p = if (root) {
+                    Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+                } else {
+                    Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
                 }
                 
-                // If standard fallbacks failed, try Local ADB
-                FileLogger.log(this, "Standard shell failed ($exitCode), attempting via Local ADB...")
-                val adbRes = executeAdbCommand("shell:$command")
-                return if (adbRes != null) 0 else exitCode
+                val finished = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } else {
+                    p.waitFor()
+                    true
+                }
+
+                if (!finished) {
+                    p.destroy()
+                    FileLogger.log(this, "Shell Timeout: $cmd", toFile = true)
+                    return -1
+                }
+
+                val exitCode = p.exitValue()
+                if (exitCode != 0) {
+                    val err = p.errorStream.bufferedReader(Charsets.UTF_8).readText().trim()
+                    if (err.isNotEmpty()) {
+                        // Truncate huge stack traces to keep logs readable
+                        val logErr = if (err.length > 1000) err.take(1000) + "... [truncated]" else err
+                        FileLogger.log(this, "Shell Err ($exitCode): $logErr for $cmd")
+                    }
+                }
+                exitCode
+            } catch (e: Exception) {
+                if (!root || cachedHasRoot == true) {
+                    FileLogger.log(this, "Shell Error: ${e.message} for command: $cmd")
+                }
+                -1
+            }
+        }
+
+        val firstCode = runInternal(command)
+        if (firstCode == 0) return 0
+
+        if (command.startsWith("am ")) {
+            val fallbackCommand = command.replaceFirst("am ", "cmd activity ")
+            if (fallbackCommand != command) {
+                FileLogger.log(this, "Shell: 'am' failed ($firstCode), trying fallback: $fallbackCommand")
+                val secondCode = runInternal(fallbackCommand)
+                if (secondCode == 0) return 0
             }
             
-            exitCode
-        } catch (e: Exception) { 
-            if (!root || cachedHasRoot == true) {
-                FileLogger.log(this, "Shell Error: ${e.message} for command: $command")
-            }
-            -1 
+            // If standard fallbacks failed, try Local ADB
+            FileLogger.log(this, "Standard shell failed, attempting via Local ADB: $command")
+            val adbRes = executeAdbCommand("shell:$command", timeoutMs = timeoutMs + 2000)
+            return if (adbRes != null) 0 else firstCode
         }
+        
+        return firstCode
     }
 
-    private fun executeAdbCommand(adbCommand: String): String? {
+    private fun executeAdbCommand(adbCommand: String, timeoutMs: Long = 10000): String? {
         val result = StringBuilder()
+        val deadline = System.currentTimeMillis() + timeoutMs
         try {
             java.net.Socket().use { socket ->
-                socket.soTimeout = 10000 // Increased to 10s for slow TV systems
-                socket.connect(java.net.InetSocketAddress("127.0.0.1", 5555), 5000)
+                socket.soTimeout = 3000 // Per-read timeout
+                socket.connect(java.net.InetSocketAddress("127.0.0.1", 5555), 3000)
                 val out = socket.getOutputStream()
                 val ins = socket.getInputStream()
 
@@ -472,19 +543,14 @@ class FullyWatchJob : JobService() {
                 val pLen = java.nio.ByteBuffer.wrap(header, 12, 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).int
                 
                 if (cmd == "AUTH") {
-                    FileLogger.log(this, "ADB Local: AUTH_REQUIRED. Please check 'Always allow' dialog on screen.", toFile = true)
+                    FileLogger.log(this, "ADB Local: AUTH_REQUIRED. Check dialog.", toFile = true)
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(FullyWatchdogConfig.PREF_ADB_AUTH_REQUIRED, true).apply()
                     return null
                 }
-                if (cmd != "CNXN") {
-                    FileLogger.log(this, "ADB Local: Unexpected CNXN response: $cmd", toFile = true)
-                    return null
-                }
+                if (cmd != "CNXN") return null
                 
-                // Consume CNXN payload (important to keep stream in sync)
-                if (pLen > 0) {
-                    val p = ByteArray(pLen)
-                    readFully(ins, p)
-                }
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(FullyWatchdogConfig.PREF_ADB_AUTH_REQUIRED, false).apply()
+                if (pLen > 0) readFully(ins, ByteArray(pLen))
 
                 // 2. Open Stream (OPEN)
                 val myLocalId = (1..65535).random()
@@ -493,27 +559,30 @@ class FullyWatchJob : JobService() {
                 
                 // 3. Response Loop
                 var deviceLocalId = 0
-                while (true) {
+                while (System.currentTimeMillis() < deadline) {
                     val head = ByteArray(24)
-                    readFully(ins, head)
+                    try {
+                        readFully(ins, head)
+                    } catch (e: java.io.InterruptedIOException) {
+                        continue // Check deadline and retry
+                    }
+                    
                     val rCmd = String(head, 0, 4)
                     val arg0 = java.nio.ByteBuffer.wrap(head, 4, 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).int
                     val payLen = java.nio.ByteBuffer.wrap(head, 12, 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).int
 
                     when (rCmd) {
-                        "OKAY" -> {
-                            deviceLocalId = arg0 // Device's local ID for this stream
-                        }
+                        "OKAY" -> deviceLocalId = arg0
                         "WRTE" -> {
                             val payload = ByteArray(payLen)
                             readFully(ins, payload)
                             result.append(String(payload, Charsets.UTF_8))
-                            // Acknowledge WRTE
                             out.write(adbMessage("OKAY", myLocalId, deviceLocalId, ""))
                             out.flush()
                         }
                         "CLSE" -> {
-                            // Send CLSE back if we haven't already to properly close the stream
+                            out.write(adbMessage("CLSE", myLocalId, deviceLocalId, ""))
+                            out.flush()
                             return result.toString().trim()
                         }
                         "FAIL" -> {
@@ -522,14 +591,13 @@ class FullyWatchJob : JobService() {
                             FileLogger.log(this, "ADB Local: FAIL: ${String(payload, Charsets.UTF_8)}")
                             return null
                         }
-                        else -> {
-                            if (payLen > 0) readFully(ins, ByteArray(payLen))
-                        }
+                        else -> if (payLen > 0) readFully(ins, ByteArray(payLen))
                     }
                 }
+                FileLogger.log(this, "ADB Local: Timeout reaching deadline for $adbCommand", toFile = true)
             }
         } catch (e: Exception) {
-            FileLogger.log(this, "ADB Connection Error: ${e.message}")
+            FileLogger.log(this, "ADB Error: ${e.message}")
         }
         return null
     }

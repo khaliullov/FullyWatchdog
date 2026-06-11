@@ -244,6 +244,8 @@ fun WatchdogScreen() {
     val lastAction = prefs.getString(PREF_LAST_ACTION, "not checked yet").orEmpty()
     val lastTopActivity = prefs.getString(PREF_LAST_TOP_ACTIVITY, "unknown").orEmpty()
     val lastTopSource = prefs.getString(PREF_LAST_TOP_SOURCE, "unknown").orEmpty()
+    val lastAppMem = prefs.getInt(FullyWatchdogConfig.PREF_LAST_APP_MEM_MB, 0)
+    val lastFreeMem = prefs.getInt(FullyWatchdogConfig.PREF_LAST_FREE_MEM_MB, 0)
     val lastTriggerReason = WatchdogSettings.getTriggerReason(context)
 
     val intervalMs = WatchdogSettings.intervalMs(context)
@@ -268,6 +270,8 @@ fun WatchdogScreen() {
     var intervalVal by remember { mutableStateOf(WatchdogSettings.intervalMs(context).toString()) }
     var deadlineVal by remember { mutableStateOf(WatchdogSettings.overrideDeadlineMs(context).toString()) }
     var relaunchVal by remember { mutableStateOf(WatchdogSettings.softRelaunchMs(context).toString()) }
+    var maxMemVal by remember { mutableStateOf(WatchdogSettings.maxMemoryMb(context).toString()) }
+    var minFreeVal by remember { mutableStateOf(WatchdogSettings.minFreeMemoryMb(context).toString()) }
     var autoCloseVal by remember { mutableStateOf(WatchdogSettings.isAutoClose(context)) }
 
     var useDefaultPackage by remember { mutableStateOf(packageVal == DEFAULT_FULLY_PACKAGE) }
@@ -275,6 +279,8 @@ fun WatchdogScreen() {
     var useDefaultInterval by remember { mutableStateOf(intervalVal == DEFAULT_WATCHDOG_INTERVAL_MS.toString()) }
     var useDefaultDeadline by remember { mutableStateOf(deadlineVal == DEFAULT_WATCHDOG_OVERRIDE_DEADLINE_MS.toString()) }
     var useDefaultRelaunch by remember { mutableStateOf(relaunchVal == DEFAULT_SOFT_RELAUNCH_INTERVAL_MS.toString()) }
+    var useDefaultMaxMem by remember { mutableStateOf(maxMemVal == FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB.toString()) }
+    var useDefaultMinFree by remember { mutableStateOf(minFreeVal == FullyWatchdogConfig.DEFAULT_MIN_FREE_MEMORY_MB.toString()) }
 
     Column(
         modifier = Modifier
@@ -340,11 +346,22 @@ fun WatchdogScreen() {
                 HorizontalDivider(color = Color(0xFF1E293B))
 
                 val isScheduled = FullyScheduler.isScheduled(context)
-                DiagnosticRow("Job Status", if (isScheduled) "Scheduled" else "Idle")
+                DiagnosticRow("Job Status", if (isScheduled) "Scheduled" else "Idle", if (isScheduled) Color(0xFF10B981) else Color(0xFF94A3B8))
                 DiagnosticRow("Last Scheduled", lastScheduled)
                 DiagnosticRow("Last Check", lastCheck)
+                DiagnosticRow("System Free RAM", "${lastFreeMem}MB", if (lastFreeMem < WatchdogSettings.minFreeMemoryMb(context)) Color(0xFFEF4444) else Color(0xFF10B981))
+                DiagnosticRow("App Memory (PSS)", "${lastAppMem}MB", if (lastAppMem > WatchdogSettings.maxMemoryMb(context)) Color(0xFFEF4444) else Color(0xFF10B981))
                 DiagnosticRow("Last Reason", lastTriggerReason)
-                DiagnosticRow("Last Result", lastAction)
+                DiagnosticRow(
+                    "Last Result", 
+                    lastAction,
+                    when {
+                        lastAction.contains("ok", ignoreCase = true) -> Color(0xFF10B981)
+                        lastAction.contains("restarted", ignoreCase = true) || lastAction.contains("started", ignoreCase = true) -> Color(0xFF3B82F6)
+                        lastAction.contains("failed", ignoreCase = true) -> Color(0xFFEF4444)
+                        else -> Color.White
+                    }
+                )
             }
         }
 
@@ -478,6 +495,32 @@ fun WatchdogScreen() {
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                 )
 
+                SettingsFieldRow(
+                    label = "Max App Memory (MB)",
+                    value = maxMemVal,
+                    onValueChange = { maxMemVal = it },
+                    useDefault = useDefaultMaxMem,
+                    onUseDefaultChange = {
+                        useDefaultMaxMem = it
+                        if (it) maxMemVal = FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB.toString()
+                    },
+                    defaultValue = FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB.toString(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+
+                SettingsFieldRow(
+                    label = "Min Free System Memory (MB)",
+                    value = minFreeVal,
+                    onValueChange = { minFreeVal = it },
+                    useDefault = useDefaultMinFree,
+                    onUseDefaultChange = {
+                        useDefaultMinFree = it
+                        if (it) minFreeVal = FullyWatchdogConfig.DEFAULT_MIN_FREE_MEMORY_MB.toString()
+                    },
+                    defaultValue = FullyWatchdogConfig.DEFAULT_MIN_FREE_MEMORY_MB.toString(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -508,6 +551,8 @@ fun WatchdogScreen() {
                             val interval = intervalVal.toLongOrNull() ?: DEFAULT_WATCHDOG_INTERVAL_MS
                             val deadline = deadlineVal.toLongOrNull() ?: DEFAULT_WATCHDOG_OVERRIDE_DEADLINE_MS
                             val relaunch = relaunchVal.toLongOrNull() ?: DEFAULT_SOFT_RELAUNCH_INTERVAL_MS
+                            val maxMem = maxMemVal.toIntOrNull() ?: FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB
+                            val minFree = minFreeVal.toIntOrNull() ?: FullyWatchdogConfig.DEFAULT_MIN_FREE_MEMORY_MB
 
                             WatchdogSettings.setConfig(
                                 context = context,
@@ -515,7 +560,9 @@ fun WatchdogScreen() {
                                 fullyActivityClass = if (useDefaultActivity) DEFAULT_FULLY_ACTIVITY_CLASS else activityVal,
                                 intervalMs = interval,
                                 overrideDeadlineMs = deadline,
-                                softRelaunchMs = relaunch
+                                softRelaunchMs = relaunch,
+                                maxMemoryMb = maxMem,
+                                minFreeMemoryMb = minFree
                             )
                             WatchdogSettings.setAutoClose(context, autoCloseVal)
 
@@ -537,6 +584,8 @@ fun WatchdogScreen() {
                             intervalVal = DEFAULT_WATCHDOG_INTERVAL_MS.toString()
                             deadlineVal = DEFAULT_WATCHDOG_OVERRIDE_DEADLINE_MS.toString()
                             relaunchVal = DEFAULT_SOFT_RELAUNCH_INTERVAL_MS.toString()
+                            maxMemVal = FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB.toString()
+                            minFreeVal = FullyWatchdogConfig.DEFAULT_MIN_FREE_MEMORY_MB.toString()
                             autoCloseVal = DEFAULT_AUTO_CLOSE
 
                             useDefaultPackage = true
@@ -544,6 +593,8 @@ fun WatchdogScreen() {
                             useDefaultInterval = true
                             useDefaultDeadline = true
                             useDefaultRelaunch = true
+                            useDefaultMaxMem = true
+                            useDefaultMinFree = true
 
                             if (WatchdogSettings.isEnabled(context)) {
                                 FullyScheduler.schedule(context, delayMs = 0L)
@@ -608,6 +659,12 @@ fun WatchdogScreen() {
                     "Running Tasks Available",
                     if (WatchdogSettings.isRunningTasksAvailable(context)) "Yes" else "No",
                     if (WatchdogSettings.isRunningTasksAvailable(context)) Color(0xFF10B981) else Color(0xFFF59E0B)
+                )
+                val adbAuthRequired = WatchdogSettings.isAdbAuthRequired(context)
+                DiagnosticRow(
+                    "Local ADB Auth",
+                    if (adbAuthRequired) "ACTION REQUIRED" else "Connected/Idle",
+                    if (adbAuthRequired) Color(0xFFEF4444) else Color(0xFF10B981)
                 )
                 DiagnosticRow("Detection Method", lastTopSource)
                 DiagnosticRow("Detected Top App", lastTopActivity)
@@ -679,7 +736,10 @@ fun SettingsFieldRow(
                 focusedBorderColor = Color(0xFF6366F1),
                 unfocusedBorderColor = Color(0xFF475569),
                 disabledBorderColor = Color(0xFF1E293B),
-                disabledTextColor = Color(0xFF94A3B8)
+                disabledTextColor = Color(0xFF94A3B8),
+                focusedLabelColor = Color.White,
+                unfocusedLabelColor = Color.White.copy(alpha = 0.7f),
+                disabledLabelColor = Color.White.copy(alpha = 0.4f)
             ),
             keyboardOptions = keyboardOptions,
             singleLine = true

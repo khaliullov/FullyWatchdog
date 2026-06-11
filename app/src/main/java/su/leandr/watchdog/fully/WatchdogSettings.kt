@@ -67,6 +67,9 @@ object WatchdogSettings {
     fun maxMemoryMb(context: Context): Int =
         prefs(context).getInt(FullyWatchdogConfig.PREF_MAX_MEMORY_MB, FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB)
 
+    fun minFreeMemoryMb(context: Context): Int =
+        prefs(context).getInt(FullyWatchdogConfig.PREF_MIN_FREE_MEMORY_MB, FullyWatchdogConfig.DEFAULT_MIN_FREE_MEMORY_MB)
+
     fun lastStartAttempts(context: Context): List<Long> =
         prefs(context).getString(PREF_LAST_START_ATTEMPTS, "").orEmpty()
             .split(',')
@@ -110,7 +113,8 @@ object WatchdogSettings {
         intervalMs: Long? = null,
         overrideDeadlineMs: Long? = null,
         softRelaunchMs: Long? = null,
-        maxMemoryMb: Int? = null
+        maxMemoryMb: Int? = null,
+        minFreeMemoryMb: Int? = null
     ) {
         val editor = prefs(context).edit()
         fullyPackage?.let { editor.putString(FullyWatchdogConfig.PREF_FULLY_PACKAGE, it.trim()) }
@@ -119,6 +123,7 @@ object WatchdogSettings {
         overrideDeadlineMs?.let { editor.putLong(FullyWatchdogConfig.PREF_OVERRIDE_DEADLINE_MS, it.coerceAtLeast(MIN_DELAY_MS)) }
         softRelaunchMs?.let { editor.putLong(FullyWatchdogConfig.PREF_SOFT_RELAUNCH_MS, it.coerceAtLeast(0L)) }
         maxMemoryMb?.let { editor.putInt(FullyWatchdogConfig.PREF_MAX_MEMORY_MB, it.coerceAtLeast(0)) }
+        minFreeMemoryMb?.let { editor.putInt(FullyWatchdogConfig.PREF_MIN_FREE_MEMORY_MB, it.coerceAtLeast(0)) }
         editor.apply()
     }
 
@@ -130,6 +135,7 @@ object WatchdogSettings {
             .putLong(FullyWatchdogConfig.PREF_OVERRIDE_DEADLINE_MS, FullyWatchdogConfig.DEFAULT_WATCHDOG_OVERRIDE_DEADLINE_MS)
             .putLong(FullyWatchdogConfig.PREF_SOFT_RELAUNCH_MS, FullyWatchdogConfig.DEFAULT_SOFT_RELAUNCH_INTERVAL_MS)
             .putInt(FullyWatchdogConfig.PREF_MAX_MEMORY_MB, FullyWatchdogConfig.DEFAULT_MAX_MEMORY_MB)
+            .putInt(FullyWatchdogConfig.PREF_MIN_FREE_MEMORY_MB, FullyWatchdogConfig.DEFAULT_MIN_FREE_MEMORY_MB)
             .putBoolean(FullyWatchdogConfig.PREF_AUTO_CLOSE, FullyWatchdogConfig.DEFAULT_AUTO_CLOSE)
             .apply()
     }
@@ -222,6 +228,9 @@ object WatchdogSettings {
         }
         return mode == android.app.AppOpsManager.MODE_ALLOWED
     }
+
+    fun isAdbAuthRequired(context: Context): Boolean =
+        prefs(context).getBoolean(FullyWatchdogConfig.PREF_ADB_AUTH_REQUIRED, false)
 
     @Suppress("DEPRECATION")
     fun isRunningTasksAvailable(context: Context): Boolean {
